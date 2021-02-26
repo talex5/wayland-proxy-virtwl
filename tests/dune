@@ -1,0 +1,3 @@
+(executable
+  (name test)
+  (libraries wayland wayland.protocols wayland_virtwl))
