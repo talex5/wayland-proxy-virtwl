@@ -485,6 +485,53 @@ let pp_closed f = function
   | Ok () -> Fmt.string f "closed connection"
   | Error ex -> Fmt.pf f "connection failed: %a" Fmt.exn ex
 
+let registry =
+  let open Wayland_proto in
+  let open Wayland_protocols.Xdg_shell_proto in
+  let open Wayland_protocols.Xdg_output_unstable_v1_proto in
+  Array.of_list [
+    entry ~max_version:3 (module Wl_compositor);
+    entry ~max_version:1 (module Wl_subcompositor);
+    entry ~max_version:1 (module Wl_shm);
+    entry ~max_version:1 (module Xdg_wm_base);
+    entry ~max_version:5 (module Wl_seat);
+    entry ~max_version:2 (module Wl_output);
+    entry ~max_version:3 (module Wl_data_device_manager);
+    entry ~max_version:3 (module Zxdg_output_manager_v1);
+  ]
+
+let make_registry t reg =
+  Proxy.Handler.attach reg @@ C.Wl_registry.v1 @@ object
+    method on_bind : type a. _ -> name:int32 -> (a, [`Unknown], _) Proxy.t -> unit =
+      fun _ ~name proxy ->
+      let name = Int32.to_int name in
+      if name < 0 || name >= Array.length registry then Fmt.failwith "Bad registry entry name %d" name;
+      let Entry (max_version, (module M)) = registry.(name) in
+      let requested_version = Int32.to_int (Proxy.version proxy) in
+      if requested_version > max_version then
+        Fmt.failwith "Client asked for %S v%d, but we only support up to %d" M.interface requested_version max_version;
+      let client_interface = Proxy.interface proxy in
+      if client_interface <> M.interface then
+        Fmt.failwith "Entry %d has type %S, client expected %S!" name M.interface client_interface;
+      let open Wayland_proto in
+      let open Wayland_protocols.Xdg_shell_proto in
+      let open Wayland_protocols.Xdg_output_unstable_v1_proto in
+      match Proxy.ty proxy with
+      | Wl_compositor.T -> make_compositor t proxy
+      | Wl_subcompositor.T -> make_subcompositor t proxy
+      | Wl_shm.T -> make_shm t proxy
+      | Wl_seat.T -> make_seat t proxy
+      | Wl_output.T -> make_output t proxy
+      | Wl_data_device_manager.T -> make_data_device_manager t proxy
+      | Xdg_wm_base.T -> make_xdg_wm_base t proxy
+      | Zxdg_output_manager_v1.T -> make_zxdg_output_manager_v1 t proxy
+      | _ -> Fmt.failwith "Invalid service name for %a" Proxy.pp proxy
+  end;
+  registry |> Array.iteri (fun i entry ->
+      let Entry (max_version, (module M)) = entry in
+      C.Wl_registry.global reg ~name:(Int32.of_int i) ~interface:M.interface ~version:(Int32.of_int max_version)
+    )
+
 let handle ~config client =
   let client_transport = Wayland.Unix_transport.of_socket client in
   let fd = Unix.(openfile "/dev/wl0" [O_RDWR; O_CLOEXEC] 0x600) in
@@ -497,53 +544,17 @@ let handle ~config client =
     host_registry;
     config;
   } in
-  let registry =
-    let open Wayland_proto in
-    let open Wayland_protocols.Xdg_shell_proto in
-    let open Wayland_protocols.Xdg_output_unstable_v1_proto in
-    Array.of_list [
-      entry ~max_version:3 (module Wl_compositor);
-      entry ~max_version:1 (module Wl_subcompositor);
-      entry ~max_version:1 (module Wl_shm);
-      entry ~max_version:1 (module Xdg_wm_base);
-      entry ~max_version:5 (module Wl_seat);
-      entry ~max_version:2 (module Wl_output);
-      entry ~max_version:3 (module Wl_data_device_manager);
-      entry ~max_version:3 (module Zxdg_output_manager_v1);
-  ] in
   let s : Server.t =
-    Server.connect client_transport (fun reg ->
-        Proxy.Handler.attach reg @@ C.Wl_registry.v1 @@ object
-          method on_bind : type a. _ -> name:int32 -> (a, [`Unknown], _) Proxy.t -> unit =
-            fun _ ~name proxy ->
-            let name = Int32.to_int name in
-            if name < 0 || name >= Array.length registry then Fmt.failwith "Bad registry entry name %d" name;
-            let Entry (max_version, (module M)) = registry.(name) in
-            let requested_version = Int32.to_int (Proxy.version proxy) in
-            if requested_version > max_version then
-              Fmt.failwith "Client asked for %S v%d, but we only support up to %d" M.interface requested_version max_version;
-            let client_interface = Proxy.interface proxy in
-            if client_interface <> M.interface then
-              Fmt.failwith "Entry %d has type %S, client expected %S!" name M.interface client_interface;
-            let open Wayland_proto in
-            let open Wayland_protocols.Xdg_shell_proto in
-            let open Wayland_protocols.Xdg_output_unstable_v1_proto in
-            match Proxy.ty proxy with
-            | Wl_compositor.T -> make_compositor t proxy
-            | Wl_subcompositor.T -> make_subcompositor t proxy
-            | Wl_shm.T -> make_shm t proxy
-            | Wl_seat.T -> make_seat t proxy
-            | Wl_output.T -> make_output t proxy
-            | Wl_data_device_manager.T -> make_data_device_manager t proxy
-            | Xdg_wm_base.T -> make_xdg_wm_base t proxy
-            | Zxdg_output_manager_v1.T -> make_zxdg_output_manager_v1 t proxy
-            | _ -> Fmt.failwith "Invalid service name for %a" Proxy.pp proxy
-        end;
-        registry |> Array.iteri (fun i entry ->
-            let Entry (max_version, (module M)) = entry in
-            C.Wl_registry.global reg ~name:(Int32.of_int i) ~interface:M.interface ~version:(Int32.of_int max_version)
-          );
-      )
+    Server.connect client_transport @@ C.Wl_display.v1 @@ object
+      method on_get_registry _ ref = make_registry t ref
+      method on_sync _ cb =
+        Proxy.Handler.attach cb @@ C.Wl_callback.v1 ();
+        let _ : _ Proxy.t = H.Wl_display.sync (Display.wl_display display) @@ H.Wl_callback.v1 @@ object
+            method on_done ~callback_data = C.Wl_callback.done_ cb ~callback_data
+          end
+        in
+        ()
+    end
   in
   let is_active = ref true in
   let client_done =
