@@ -4,6 +4,8 @@ external virtwl_new_context : Unix.file_descr -> Unix.file_descr = "ocaml_virtwl
 external virtwl_send : Unix.file_descr -> Lwt_bytes.t -> int -> int -> Unix.file_descr list -> unit = "ocaml_virtwl_send"
 external virtwl_recv : Unix.file_descr -> Lwt_bytes.t -> int -> int -> int * Unix.file_descr list = "ocaml_virtwl_recv"
 external virtwl_alloc : Unix.file_descr -> int -> Unix.file_descr = "ocaml_virtwl_alloc"
+external virtwl_pipe_read : Unix.file_descr -> Unix.file_descr = "ocaml_virtwl_pipe_read"
+external virtwl_pipe_write : Unix.file_descr -> Unix.file_descr = "ocaml_virtwl_pipe_write"
 external virtwl_map_file : Unix.file_descr -> ('a, 'b) Stdlib.Bigarray.kind -> int -> ('a, 'b, 'c) Stdlib.Bigarray.Genarray.t
   = "ocaml_virtwl_map_file"
 
@@ -35,3 +37,9 @@ let map_file fd kind ~n_elements = virtwl_map_file fd kind n_elements
 
 let alloc t ~size =
   virtwl_alloc t size
+
+let pipe_read t =
+  virtwl_pipe_read t
+
+let pipe_write t =
+  virtwl_pipe_write t

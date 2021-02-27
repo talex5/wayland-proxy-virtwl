@@ -2,3 +2,5 @@
   (name virtwl_proxy)
   (public_name wayland-proxy-virtwl)
   (libraries wayland wayland.protocols wayland_virtwl cmdliner))
+
+(vendored_dirs ocaml-wayland)

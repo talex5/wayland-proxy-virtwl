@@ -101,6 +101,32 @@ CAMLprim value ocaml_virtwl_alloc(value val_control, value val_size) {
   CAMLreturn (Val_int(data.fd));
 }
 
+CAMLprim value ocaml_virtwl_pipe_read(value val_control) {
+  CAMLparam1 (val_control);
+  int control_fd = Int_val(val_control);
+  struct virtwl_ioctl_new data = { 0 };
+  data.type = VIRTWL_IOCTL_NEW_PIPE_READ;
+  data.fd = -1;
+  data.flags = 0;
+  if (ioctl(control_fd, VIRTWL_IOCTL_NEW, &data)) {
+    uerror("VIRTWL_IOCTL_NEW_PIPE_READ", Nothing);
+  };
+  CAMLreturn (Val_int(data.fd));
+}
+
+CAMLprim value ocaml_virtwl_pipe_write(value val_control) {
+  CAMLparam1 (val_control);
+  int control_fd = Int_val(val_control);
+  struct virtwl_ioctl_new data = { 0 };
+  data.type = VIRTWL_IOCTL_NEW_PIPE_WRITE;
+  data.fd = -1;
+  data.flags = 0;
+  if (ioctl(control_fd, VIRTWL_IOCTL_NEW, &data)) {
+    uerror("VIRTWL_IOCTL_NEW_PIPE_WRITE", Nothing);
+  };
+  CAMLreturn (Val_int(data.fd));
+}
+
 /* Simplified version of the stdlib's map_file that doesn't try to call fstat or ftruncate. */
 CAMLprim value ocaml_virtwl_map_file(value vfd, value vkind, value vsize)
 {

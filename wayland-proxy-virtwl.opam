@@ -28,3 +28,6 @@ build: [
   ]
 ]
 dev-repo: "git+https://github.com/talex5/virtwl-proxy.git"
+depexts: [
+  ["linux-headers"] {os-distribution = "alpine"}
+]

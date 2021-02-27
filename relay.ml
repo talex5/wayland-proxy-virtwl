@@ -5,12 +5,14 @@ module H = struct
   include Wayland.Wayland_client
   include Wayland_protocols.Xdg_shell_client
   include Wayland_protocols.Xdg_output_unstable_v1_client
+  include Wayland_protocols.Gtk_primary_selection_client
 end
 
 module C = struct
   include Wayland.Wayland_server
   include Wayland_protocols.Xdg_shell_server
   include Wayland_protocols.Xdg_output_unstable_v1_server
+  include Wayland_protocols.Gtk_primary_selection_server
 end
 
 type t = {
@@ -55,22 +57,32 @@ type host_surface = {
   client_surface : ([`Wl_surface], [`V3], [`Server]) Proxy.t;
 }
 
+type host_data_offer = ([`Wl_data_offer], [`V3], [`Server]) Proxy.t
+type data_source = ([`Wl_data_source], [`V3], [`Client]) Proxy.t
+
+type host_gtk_data_offer = ([`Gtk_primary_selection_offer], [`V1], [`Server]) Proxy.t
+type gtk_source = ([`Gtk_primary_selection_source], [`V1], [`Client]) Proxy.t
+
 type xdg_surface = [`V1] H.Xdg_surface.t
 type xdg_positioner = [`V1] H.Xdg_positioner.t
 
 (* Note: the role here is our role: [`Server] data is attached to proxies to
  our clients (where we are the server), while [`Client] data is attached to host objects. *)
 type ('a, 'role) user_data = 
-  | Region      : region_data -> ([`Wl_region],    [`Server]) user_data
-  | Surface     : surface     -> ([`Wl_surface],   [`Server]) user_data
-  | Buffer      : buffer      -> ([`Wl_buffer],    [`Server]) user_data
-  | Seat        : seat        -> ([`Wl_seat],      [`Server]) user_data
-  | Output      : output      -> ([`Wl_output],    [`Server]) user_data
-  | Toplevel    : toplevel    -> ([`Xdg_toplevel], [`Server]) user_data
-  | Xdg_surface : xdg_surface -> ([`Xdg_surface],  [`Server]) user_data
-  | Xdg_positioner : xdg_positioner -> ([`Xdg_positioner], [`Server]) user_data
-  | Host_surface : host_surface -> ([`Wl_surface], [`Client]) user_data
-  | Host_output  : host_output  -> ([`Wl_output],  [`Client]) user_data
+  | Region           : region_data      -> ([`Wl_region],      [`Server]) user_data
+  | Surface          : surface          -> ([`Wl_surface],     [`Server]) user_data
+  | Buffer           : buffer           -> ([`Wl_buffer],      [`Server]) user_data
+  | Seat             : seat             -> ([`Wl_seat],        [`Server]) user_data
+  | Output           : output           -> ([`Wl_output],      [`Server]) user_data
+  | Toplevel         : toplevel         -> ([`Xdg_toplevel],   [`Server]) user_data
+  | Xdg_surface      : xdg_surface      -> ([`Xdg_surface],    [`Server]) user_data
+  | Xdg_positioner   : xdg_positioner   -> ([`Xdg_positioner], [`Server]) user_data
+  | Data_source      : data_source      -> ([`Wl_data_source], [`Server]) user_data
+  | Gtk_source       : gtk_source       -> ([`Gtk_primary_selection_source], [`Server]) user_data
+  | Host_surface     : host_surface     -> ([`Wl_surface],     [`Client]) user_data
+  | Host_data_offer  : host_data_offer  -> ([`Wl_data_offer],  [`Client]) user_data
+  | Host_gtk_data_offer : host_gtk_data_offer  -> ([`Gtk_primary_selection_offer],  [`Client]) user_data
+  | Host_output      : host_output      -> ([`Wl_output],      [`Client]) user_data
 
 type ('a, 'role) Wayland.S.user_data += Relay of ('a, 'role) user_data
 
@@ -84,9 +96,17 @@ let client_output h =
   let Host_output { client_output } = user_data h in
   client_output
 
-let client_surface surface =
-  let Host_surface { client_surface } = user_data surface in
+let client_surface h =
+  let Host_surface { client_surface } = user_data h in
   client_surface
+
+let client_data_offer h =
+  let Host_data_offer c = user_data h in
+  c
+
+let client_gtk_data_offer h =
+  let Host_gtk_data_offer c = user_data h in
+  c
 
 let host_surface surface =
   let Surface x = user_data surface in
@@ -114,6 +134,14 @@ let host_xdg_surface c =
 
 let host_positioner c =
   let Xdg_positioner h = user_data c in
+  h
+
+let host_data_source c =
+  let Data_source h = user_data c in
+  h
+
+let host_gtk_source c =
+  let Gtk_source h = user_data c in
   h
 
 let with_memory_fd t ~size f =
@@ -325,7 +353,7 @@ let make_seat t c =
           method on_release = delete_with H.Wl_pointer.release h
         end
 
-      method on_get_touch _ = Fmt.failwith "TODO"
+      method on_get_touch _ = Fmt.failwith "TODO: on_get_touch"
       method on_release = delete_with H.Wl_seat.release host
     end
   in
@@ -458,20 +486,134 @@ let make_zxdg_output_manager_v1 t proxy =
   in
   ()
 
-let make_data_device c =
-  Proxy.Handler.attach c @@ C.Wl_data_device.v3 @@ object
-    method on_release t = Proxy.delete t
-    method on_set_selection _ ~source:_ ~serial:_ = ()
-    method on_start_drag _ ~source:_ ~origin:_ ~icon:_ ~serial:_ = ()
+let make_data_offer t ~client_offer h =
+  let c = client_offer @@ C.Wl_data_offer.v3 @@ object
+    method on_accept _ = H.Wl_data_offer.accept h
+    method on_destroy c =
+      delete_with H.Wl_data_offer.destroy h c;
+      (* Effectively, the "selection" event is the destructor of the previous selection,
+         and this is the confirmation. The server doesn't send a delete event, so just do it manually. *)
+      Proxy.delete h
+    method on_finish _ = H.Wl_data_offer.finish h
+    method on_receive _ ~mime_type ~fd =
+      Pipes.with_wrapped_writeable t.virtwl fd @@ fun fd ->
+      H.Wl_data_offer.receive h ~mime_type ~fd
+    method on_set_actions _ = H.Wl_data_offer.set_actions h
+  end in
+  let user_data = Relay (Host_data_offer c) in
+  Proxy.Handler.attach h @@ H.Wl_data_offer.v3 ~user_data @@ object (_ : _ H.Wl_data_offer.h3)
+    method on_action _ = C.Wl_data_offer.action c
+    method on_offer _ = C.Wl_data_offer.offer c
+    method on_source_actions _ = C.Wl_data_offer.source_actions c
+  end
+
+let make_data_source ~host_source c =
+  let h =
+    host_source @@ H.Wl_data_source.v3 @@ object (_ : _ H.Wl_data_source.h3)
+      method on_action _ = C.Wl_data_source.action c
+      method on_cancelled _ = C.Wl_data_source.cancelled c
+      method on_dnd_drop_performed _ = C.Wl_data_source.dnd_drop_performed c
+      method on_dnd_finished _ = C.Wl_data_source.dnd_finished c
+      method on_send _ ~mime_type ~fd =
+        C.Wl_data_source.send c ~mime_type ~fd;
+        Unix.close fd
+      method on_target _ = C.Wl_data_source.target c
+    end in
+  let user_data = Relay (Data_source h) in
+  Proxy.Handler.attach c @@ C.Wl_data_source.v3 ~user_data @@ object (_ : _ C.Wl_data_source.h3)
+      method on_destroy = delete_with H.Wl_data_source.destroy h
+      method on_offer _ = H.Wl_data_source.offer h
+      method on_set_actions _ = H.Wl_data_source.set_actions h
+  end
+
+let make_data_device t ~host_device c =
+  let h = host_device @@ H.Wl_data_device.v3 @@ object (_ : _ H.Wl_data_device.h2)
+      method on_data_offer _ offer = make_data_offer t ~client_offer:(C.Wl_data_device.data_offer c) offer
+      method on_drop _ = C.Wl_data_device.drop c
+      method on_enter _ ~serial ~surface ~x ~y offer =
+        C.Wl_data_device.enter c ~serial ~surface:(client_surface surface) ~x ~y (Option.map client_data_offer offer)
+      method on_leave _ = C.Wl_data_device.leave c
+      method on_motion _ = C.Wl_data_device.motion c
+      method on_selection _ offer = C.Wl_data_device.selection c (Option.map client_data_offer offer)
+    end in
+  Proxy.Handler.attach c @@ C.Wl_data_device.v3 @@ object (_ : _ C.Wl_data_device.h2)
+    method on_release = delete_with H.Wl_data_device.release h
+    method on_set_selection _ ~source = H.Wl_data_device.set_selection h ~source:(Option.map host_data_source source)
+    method on_start_drag _ ~source ~origin ~icon =
+      H.Wl_data_device.start_drag h
+        ~source:(Option.map host_data_source source)
+        ~origin:(host_surface origin)
+        ~icon:(Option.map host_surface icon)
   end
 
 let make_data_device_manager t proxy =
   let proxy = Proxy.cast_version proxy in
-  let _host = Wayland.Registry.bind t.host_registry @@ H.Wl_data_device_manager.v3 () in
+  let host = Wayland.Registry.bind t.host_registry @@ H.Wl_data_device_manager.v3 () in
   let _ : _ Proxy.t = Proxy.Service_handler.attach proxy @@ C.Wl_data_device_manager.v3 @@ object
-      method on_create_data_source _ _source = failwith "TODO"
-      method on_get_data_device _ data_device ~seat:_ =
-        make_data_device data_device
+      method on_create_data_source _ c =
+        make_data_source c ~host_source:(H.Wl_data_device_manager.create_data_source host)
+      method on_get_data_device _ c ~seat =
+        let seat = host_seat seat in
+        make_data_device t c ~host_device:(H.Wl_data_device_manager.get_data_device host ~seat)
+    end
+  in
+  ()
+
+let make_gtk_data_offer t ~client_offer h =
+  let c = client_offer @@ C.Gtk_primary_selection_offer.v1 @@ object (_ : _ C.Gtk_primary_selection_offer.h1)
+    method on_destroy c =
+      delete_with H.Gtk_primary_selection_offer.destroy h c;
+      (* Effectively, the "selection" event is the destructor of the previous selection,
+         and this is the confirmation. The server doesn't send a delete event, so just do it manually. *)
+      Proxy.delete h
+
+    method on_receive _ ~mime_type ~fd =
+      Pipes.with_wrapped_writeable t.virtwl fd @@ fun fd ->
+      H.Gtk_primary_selection_offer.receive h ~mime_type ~fd
+  end in
+  let user_data = Relay (Host_gtk_data_offer c) in
+  Proxy.Handler.attach h @@ H.Gtk_primary_selection_offer.v1 ~user_data @@ object
+    method on_offer _ = C.Gtk_primary_selection_offer.offer c
+  end
+
+let make_gtk_primary_selection_source ~host_source c =
+  let h =
+    host_source @@ H.Gtk_primary_selection_source.v1 @@ object
+      method on_cancelled _ = C.Gtk_primary_selection_source.cancelled c
+      method on_send _ ~mime_type ~fd =
+        C.Gtk_primary_selection_source.send c ~mime_type ~fd;
+        Unix.close fd
+    end in
+  let user_data = Relay (Gtk_source h) in
+  Proxy.Handler.attach c @@ C.Gtk_primary_selection_source.v1 ~user_data @@ object
+      method on_destroy = delete_with H.Gtk_primary_selection_source.destroy h
+      method on_offer _ = H.Gtk_primary_selection_source.offer h
+  end
+
+let make_gtk_primary_selection_device t ~host_device c =
+  let h = host_device @@ H.Gtk_primary_selection_device.v1 @@ object (_ : _ H.Gtk_primary_selection_device.h1)
+      method on_data_offer _ offer = make_gtk_data_offer t ~client_offer:(C.Gtk_primary_selection_device.data_offer c) offer
+      method on_selection _ offer = C.Gtk_primary_selection_device.selection c (Option.map client_gtk_data_offer offer)
+    end in
+  Proxy.Handler.attach c @@ C.Gtk_primary_selection_device.v1 @@ object
+    method on_destroy = delete_with H.Gtk_primary_selection_device.destroy h
+    method on_set_selection _ ~source =
+      let source = Option.map host_gtk_source source in
+      H.Gtk_primary_selection_device.set_selection h ~source
+  end
+
+let make_gtk_primary_selection_device_manager t proxy =
+  let proxy = Proxy.cast_version proxy in
+  let h = Wayland.Registry.bind t.host_registry @@ H.Gtk_primary_selection_device_manager.v1 () in
+  let _ : _ Proxy.t = Proxy.Service_handler.attach proxy @@ C.Gtk_primary_selection_device_manager.v1 @@ object
+      method on_create_source _ source =
+        let host_source = H.Gtk_primary_selection_device_manager.create_source h in
+        make_gtk_primary_selection_source ~host_source source
+      method on_destroy = delete_with H.Gtk_primary_selection_device_manager.destroy h
+      method on_get_device _ dev ~seat =
+        let seat = host_seat seat in
+        let host_device = H.Gtk_primary_selection_device_manager.get_device h ~seat in
+        make_gtk_primary_selection_device t ~host_device dev
     end
   in
   ()
@@ -488,15 +630,17 @@ let registry =
   let open Wayland_proto in
   let open Wayland_protocols.Xdg_shell_proto in
   let open Wayland_protocols.Xdg_output_unstable_v1_proto in
+  let open Wayland_protocols.Gtk_primary_selection_proto in
   Array.of_list [
     entry ~max_version:3 (module Wl_compositor);
     entry ~max_version:1 (module Wl_subcompositor);
     entry ~max_version:1 (module Wl_shm);
     entry ~max_version:1 (module Xdg_wm_base);
-    entry ~max_version:5 (module Wl_seat);
     entry ~max_version:2 (module Wl_output);
     entry ~max_version:3 (module Wl_data_device_manager);
     entry ~max_version:3 (module Zxdg_output_manager_v1);
+    entry ~max_version:1 (module Gtk_primary_selection_device_manager);
+    entry ~max_version:5 (module Wl_seat); (* Must come after gtk, or evince crashes *)
   ]
 
 let make_registry t reg =
@@ -515,6 +659,7 @@ let make_registry t reg =
       let open Wayland_proto in
       let open Wayland_protocols.Xdg_shell_proto in
       let open Wayland_protocols.Xdg_output_unstable_v1_proto in
+      let open Wayland_protocols.Gtk_primary_selection_proto in
       match Proxy.ty proxy with
       | Wl_compositor.T -> make_compositor t proxy
       | Wl_subcompositor.T -> make_subcompositor t proxy
@@ -524,6 +669,7 @@ let make_registry t reg =
       | Wl_data_device_manager.T -> make_data_device_manager t proxy
       | Xdg_wm_base.T -> make_xdg_wm_base t proxy
       | Zxdg_output_manager_v1.T -> make_zxdg_output_manager_v1 t proxy
+      | Gtk_primary_selection_device_manager.T -> make_gtk_primary_selection_device_manager t proxy
       | _ -> Fmt.failwith "Invalid service name for %a" Proxy.pp proxy
   end;
   registry |> Array.iteri (fun i entry ->
