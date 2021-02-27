@@ -118,7 +118,6 @@ let host_positioner c =
 
 let with_memory_fd t ~size f =
   let fd = Wayland_virtwl.alloc t.virtwl ~size in
-  Fmt.pr "Got memory FD: %d@." (Obj.magic fd : int);
   Fun.protect
     (fun () -> f fd)
     ~finally:(fun () -> Unix.close fd)
@@ -537,7 +536,7 @@ let handle ~config client =
   let fd = Unix.(openfile "/dev/wl0" [O_RDWR; O_CLOEXEC] 0x600) in
   let virtwl = Wayland_virtwl.of_fd fd in
   let host_transport = Wayland_virtwl.new_context virtwl in
-  let display, host_closed = Wayland.Display.connect host_transport in
+  let display, host_closed = Wayland.Display.connect ~trace:(module Trace.Host) host_transport in
   let* host_registry = Wayland.Registry.of_display display in
   let t = {
     virtwl;
@@ -545,15 +544,16 @@ let handle ~config client =
     config;
   } in
   let s : Server.t =
-    Server.connect client_transport @@ C.Wl_display.v1 @@ object
+    Server.connect client_transport ~trace:(module Trace.Client) @@ C.Wl_display.v1 @@ object
       method on_get_registry _ ref = make_registry t ref
       method on_sync _ cb =
         Proxy.Handler.attach cb @@ C.Wl_callback.v1 ();
-        let _ : _ Proxy.t = H.Wl_display.sync (Display.wl_display display) @@ H.Wl_callback.v1 @@ object
-            method on_done ~callback_data = C.Wl_callback.done_ cb ~callback_data
+        let h : _ Proxy.t = H.Wl_display.sync (Display.wl_display display) @@ H.Wl_callback.v1 @@ object
+            method on_done ~callback_data =
+              C.Wl_callback.done_ cb ~callback_data
           end
         in
-        ()
+        Proxy.on_delete h (fun () -> Proxy.delete cb)
     end
   in
   let is_active = ref true in
