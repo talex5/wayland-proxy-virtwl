@@ -22,9 +22,6 @@ It uses the [ocaml-wayland][] library.
 So far, it has only been tested with `evince` (GNOME's PDF viewer) and provides only the exact protocol versions that it requires. Also:
 
 - Find alternative to private `caml_unix_mapped_alloc`.
-- Clipboard support.
-- Better connection shutdown logic.
-- Support more protocols.
 
 [sommelier]: https://chromium.googlesource.com/chromiumos/platform2/+/main/vm_tools/sommelier/
 [ocaml-wayland]: https://github.com/talex5/ocaml-wayland
