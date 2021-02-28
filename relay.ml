@@ -23,40 +23,42 @@ type t = {
   host_registry : Wayland.Registry.t;
 }
 
-(* Data attached to host objects (e.g. the corresponding client object). *)
+(* Data attached to host objects (e.g. the corresponding client object).
+   Host and client versions are assumed to match. *)
 module HD = struct
   type 'a t = 
-    | Surface        : [`V3] C.Wl_surface.t                   -> [`Wl_surface]                  t
-    | Data_offer     : [`V3] C.Wl_data_offer.t                -> [`Wl_data_offer]               t
-    | Gtk_data_offer : [`V1] C.Gtk_primary_selection_offer.t  -> [`Gtk_primary_selection_offer] t
-    | Output         : [`V1] C.Wl_output.t                    -> [`Wl_output]                   t
+    | Surface        : 'v C.Wl_surface.t                   -> [`Wl_surface]                  t
+    | Data_offer     : 'v C.Wl_data_offer.t                -> [`Wl_data_offer]               t
+    | Gtk_data_offer : 'v C.Gtk_primary_selection_offer.t  -> [`Gtk_primary_selection_offer] t
+    | Output         : 'v C.Wl_output.t                    -> [`Wl_output]                   t
 end
 
-(* Data attached to client objects (e.g. the corresponding host object). *)
+(* Data attached to client objects (e.g. the corresponding host object).
+   Host and client versions are assumed to match. *)
 module CD = struct
-  type buffer = {
-    host_buffer : [`V1] H.Wl_buffer.t;
+  type 'v buffer = {
+    host_buffer : 'v H.Wl_buffer.t;
     host_memory : Cstruct.t;
     client_memory : Cstruct.t;
   }
 
-  type surface = {
-    host_surface : [`V3] H.Wl_surface.t;
+  type 'v surface = {
+    host_surface : 'v H.Wl_surface.t;
     mutable host_memory : Cstruct.t;
     mutable client_memory : Cstruct.t;
   }
 
   type 'a t = 
-    | Region           : [`V3] H.Wl_region.t                    -> [`Wl_region]                    t
-    | Surface          : surface                                -> [`Wl_surface]                   t
-    | Buffer           : buffer                                 -> [`Wl_buffer]                    t
-    | Seat             : [`V5] H.Wl_seat.t                      -> [`Wl_seat]                      t
-    | Output           : [`V2] H.Wl_output.t                    -> [`Wl_output]                    t
-    | Toplevel         : [`V1] H.Xdg_toplevel.t                 -> [`Xdg_toplevel]                 t
-    | Xdg_surface      : [`V1] H.Xdg_surface.t                  -> [`Xdg_surface]                  t
-    | Xdg_positioner   : [`V1] H.Xdg_positioner.t               -> [`Xdg_positioner]               t
-    | Data_source      : [`V3] H.Wl_data_source.t               -> [`Wl_data_source]               t
-    | Gtk_source       : [`V1] H.Gtk_primary_selection_source.t -> [`Gtk_primary_selection_source] t
+    | Region           : 'v H.Wl_region.t                    -> [`Wl_region]                    t
+    | Surface          : 'v surface                          -> [`Wl_surface]                   t
+    | Buffer           : 'v buffer                           -> [`Wl_buffer]                    t
+    | Seat             : 'v H.Wl_seat.t                      -> [`Wl_seat]                      t
+    | Output           : 'v H.Wl_output.t                    -> [`Wl_output]                    t
+    | Toplevel         : 'v H.Xdg_toplevel.t                 -> [`Xdg_toplevel]                 t
+    | Xdg_surface      : 'v H.Xdg_surface.t                  -> [`Xdg_surface]                  t
+    | Xdg_positioner   : 'v H.Xdg_positioner.t               -> [`Xdg_positioner]               t
+    | Data_source      : 'v H.Wl_data_source.t               -> [`Wl_data_source]               t
+    | Gtk_source       : 'v H.Gtk_primary_selection_source.t -> [`Gtk_primary_selection_source] t
 end
 
 (* Note: the role here is our role: [`Server] data is attached to proxies to
