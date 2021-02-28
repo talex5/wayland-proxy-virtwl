@@ -23,7 +23,7 @@ let copy_stream ~src ~dst =
 (** [with_wrapped_writeable virtwl client_fd f] creates a new pipe from the host,
     calls [f pipe_fd], and spawns a background thread that copies from the host
     to [client_fd]. [pipe_fd] can be passed to virtwl. Takes ownership of [client_fd]. *)
-let with_wrapped_writeable virtwl fd f =
+let with_wrapped_writeable ~virtwl fd f =
   let host_fd = Wayland_virtwl.pipe_read virtwl in
   Lwt.dont_wait (fun () ->
       Lwt.finalize
