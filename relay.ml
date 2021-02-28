@@ -1,6 +1,7 @@
 open Lwt.Syntax
 open Wayland
 
+(* Modules we use to interact with the host (to which we are a client). *)
 module H = struct
   include Wayland.Wayland_client
   include Wayland_protocols.Xdg_shell_client
@@ -8,6 +9,7 @@ module H = struct
   include Wayland_protocols.Gtk_primary_selection_client
 end
 
+(* Modules we use to interact with clients (to which we are a server). *)
 module C = struct
   include Wayland.Wayland_server
   include Wayland_protocols.Xdg_shell_server
@@ -21,52 +23,52 @@ type t = {
   host_registry : Wayland.Registry.t;
 }
 
-type region_data = [`V3] H.Wl_region.t
+(* Data attached to host objects (e.g. the corresponding client object). *)
+module HD = struct
+  type 'a t = 
+    | Surface        : [`V3] C.Wl_surface.t                   -> [`Wl_surface]                  t
+    | Data_offer     : [`V3] C.Wl_data_offer.t                -> [`Wl_data_offer]               t
+    | Gtk_data_offer : [`V1] C.Gtk_primary_selection_offer.t  -> [`Gtk_primary_selection_offer] t
+    | Output         : [`V1] C.Wl_output.t                    -> [`Wl_output]                   t
+end
 
-type buffer = {
-  host_buffer : [`V1] H.Wl_buffer.t;
-  host_memory : Cstruct.t;
-  client_memory : Cstruct.t;
-}
+(* Data attached to client objects (e.g. the corresponding host object). *)
+module CD = struct
+  type buffer = {
+    host_buffer : [`V1] H.Wl_buffer.t;
+    host_memory : Cstruct.t;
+    client_memory : Cstruct.t;
+  }
 
-type seat = [`V5] H.Wl_seat.t
+  type surface = {
+    host_surface : [`V3] H.Wl_surface.t;
+    mutable host_memory : Cstruct.t;
+    mutable client_memory : Cstruct.t;
+  }
 
-type surface = {
-  host_surface : [`V3] H.Wl_surface.t;
-  mutable host_memory : Cstruct.t;
-  mutable client_memory : Cstruct.t;
-}
-
-type output = [`V2] H.Wl_output.t
-type toplevel = [`V1] H.Xdg_toplevel.t
-type host_output = [`V1] C.Wl_output.t
-type host_surface = [`V3] C.Wl_surface.t
-type host_data_offer = [`V3] C.Wl_data_offer.t
-type data_source = [`V3] H.Wl_data_source.t
-type host_gtk_data_offer = [`V1] C.Gtk_primary_selection_offer.t
-type gtk_source = [`V1] H.Gtk_primary_selection_source.t
-type xdg_surface = [`V1] H.Xdg_surface.t
-type xdg_positioner = [`V1] H.Xdg_positioner.t
+  type 'a t = 
+    | Region           : [`V3] H.Wl_region.t                    -> [`Wl_region]                    t
+    | Surface          : surface                                -> [`Wl_surface]                   t
+    | Buffer           : buffer                                 -> [`Wl_buffer]                    t
+    | Seat             : [`V5] H.Wl_seat.t                      -> [`Wl_seat]                      t
+    | Output           : [`V2] H.Wl_output.t                    -> [`Wl_output]                    t
+    | Toplevel         : [`V1] H.Xdg_toplevel.t                 -> [`Xdg_toplevel]                 t
+    | Xdg_surface      : [`V1] H.Xdg_surface.t                  -> [`Xdg_surface]                  t
+    | Xdg_positioner   : [`V1] H.Xdg_positioner.t               -> [`Xdg_positioner]               t
+    | Data_source      : [`V3] H.Wl_data_source.t               -> [`Wl_data_source]               t
+    | Gtk_source       : [`V1] H.Gtk_primary_selection_source.t -> [`Gtk_primary_selection_source] t
+end
 
 (* Note: the role here is our role: [`Server] data is attached to proxies to
  our clients (where we are the server), while [`Client] data is attached to host objects. *)
 type ('a, 'role) user_data = 
-  | Region           : region_data      -> ([`Wl_region],      [`Server]) user_data
-  | Surface          : surface          -> ([`Wl_surface],     [`Server]) user_data
-  | Buffer           : buffer           -> ([`Wl_buffer],      [`Server]) user_data
-  | Seat             : seat             -> ([`Wl_seat],        [`Server]) user_data
-  | Output           : output           -> ([`Wl_output],      [`Server]) user_data
-  | Toplevel         : toplevel         -> ([`Xdg_toplevel],   [`Server]) user_data
-  | Xdg_surface      : xdg_surface      -> ([`Xdg_surface],    [`Server]) user_data
-  | Xdg_positioner   : xdg_positioner   -> ([`Xdg_positioner], [`Server]) user_data
-  | Data_source      : data_source      -> ([`Wl_data_source], [`Server]) user_data
-  | Gtk_source       : gtk_source       -> ([`Gtk_primary_selection_source], [`Server]) user_data
-  | Host_surface     : host_surface     -> ([`Wl_surface],     [`Client]) user_data
-  | Host_data_offer  : host_data_offer  -> ([`Wl_data_offer],  [`Client]) user_data
-  | Host_gtk_data_offer : host_gtk_data_offer  -> ([`Gtk_primary_selection_offer],  [`Client]) user_data
-  | Host_output      : host_output      -> ([`Wl_output],      [`Client]) user_data
+  | Client_data      : 'a CD.t -> ('a, [`Server]) user_data
+  | Host_data        : 'a HD.t -> ('a, [`Client]) user_data
 
 type ('a, 'role) Wayland.S.user_data += Relay of ('a, 'role) user_data
+
+let host_data x = Relay (Host_data x)
+let client_data x = Relay (Client_data x)
 
 let user_data (proxy : ('a, _, 'role) Proxy.t) : ('a, 'role) user_data =
   match Wayland.Proxy.user_data proxy with
@@ -76,15 +78,18 @@ let user_data (proxy : ('a, _, 'role) Proxy.t) : ('a, 'role) user_data =
 
 let to_client (type a) (h : (a, 'v, [`Client]) Proxy.t) : (a, 'v, [`Server]) Proxy.t =
   let cv = Proxy.cast_version in
-  match user_data h with
-  | Host_output c -> cv c
-  | Host_surface c -> cv c
-  | Host_data_offer c -> cv c
-  | Host_gtk_data_offer c -> cv c
+  let Host_data data = user_data h in
+  let open HD in
+  match data with
+  | Output c -> cv c
+  | Surface c -> cv c
+  | Data_offer c -> cv c
+  | Gtk_data_offer c -> cv c
 
 let to_host (type a) (c : (a, 'v, [`Server]) Proxy.t) : (a, 'v, [`Client]) Proxy.t =
   let cv = Proxy.cast_version in
-  match user_data c with
+  let Client_data data = user_data c in
+  match data with
   | Surface x -> cv x.host_surface
   | Seat x -> cv x
   | Output x -> cv x
@@ -110,7 +115,7 @@ let delete_with fn host client =
   fn host
 
 let make_region ~host_region:h r =
-  let user_data = Relay (Region h) in
+  let user_data = client_data (Region h) in
   Proxy.Handler.attach r @@ C.Wl_region.v3 ~user_data @@ object
     method on_add _ = H.Wl_region.add h
     method on_subtract _ = H.Wl_region.subtract h
@@ -118,12 +123,12 @@ let make_region ~host_region:h r =
   end
 
 let make_surface ~host_surface _t proxy =
-  let data = { host_surface; host_memory = Cstruct.empty; client_memory = Cstruct.empty } in
-  Proxy.Handler.attach proxy @@ C.Wl_surface.v3 ~user_data:(Relay (Surface data)) @@ object (_ : 'a C.Wl_surface.h3)
+  let data = { CD.host_surface; host_memory = Cstruct.empty; client_memory = Cstruct.empty } in
+  Proxy.Handler.attach proxy @@ C.Wl_surface.v3 ~user_data:(client_data (Surface data)) @@ object (_ : 'a C.Wl_surface.h3)
     method on_attach _ ~buffer ~x ~y =
       match buffer with
       | Some buffer ->
-        let Buffer buffer = user_data buffer in
+        let Client_data (Buffer buffer) = user_data buffer in
         data.host_memory <- buffer.host_memory;
         data.client_memory <- buffer.client_memory;
         H.Wl_surface.attach host_surface ~buffer:(Some buffer.host_buffer) ~x ~y
@@ -158,7 +163,7 @@ let make_compositor t proxy =
         make_region ~host_region region
 
       method on_create_surface _ surface =
-        let user_data = Relay (Host_surface surface ) in
+        let user_data = host_data (HD.Surface surface ) in
         let host_surface = H.Wl_compositor.create_surface host @@ H.Wl_surface.v3 ~user_data @@ object (_ : _ H.Wl_surface.h3)
             method on_enter _ ~output = C.Wl_surface.enter surface ~output:(to_client output)
             method on_leave _ ~output = C.Wl_surface.leave surface ~output:(to_client output)
@@ -194,7 +199,7 @@ let make_subcompositor t proxy =
   ()
 
 let make_buffer ~host_buffer ~host_memory ~client_memory proxy =
-  let user_data = Relay (Buffer {host_buffer; host_memory; client_memory}) in
+  let user_data = client_data (Buffer {host_buffer; host_memory; client_memory}) in
   Proxy.Handler.attach proxy @@ C.Wl_buffer.v1 ~user_data @@ object
     method on_destroy = delete_with H.Wl_buffer.destroy host_buffer
   end
@@ -247,7 +252,7 @@ let make_shm_pool t ~host_shm ~fd:client_fd ~size:orig_size proxy =
 let make_output t c =
   let c = Proxy.cast_version c in
   let h =
-    let user_data = Relay (Host_output c) in
+    let user_data = host_data (HD.Output c) in
     Wayland.Registry.bind t.host_registry @@ H.Wl_output.v2 ~user_data @@ object
       method on_done _ = C.Wl_output.done_ c
       method on_geometry _ = C.Wl_output.geometry c
@@ -256,7 +261,7 @@ let make_output t c =
     end
   in
   let _ : _ Proxy.t =
-    let user_data = Relay (Output h) in
+    let user_data = client_data (Output h) in
     Proxy.Service_handler.attach c @@ C.Wl_output.v2 ~user_data () in
   ()
 
@@ -269,7 +274,7 @@ let make_seat t c =
       method on_name _ = C.Wl_seat.name c
     end
   in
-  let user_data = Relay (Seat host) in
+  let user_data = client_data (Seat host) in
   let _ : _ Proxy.t = Proxy.Service_handler.attach c @@ C.Wl_seat.v5 ~user_data @@ object
       method on_get_keyboard _ keyboard =
         let h : _ Proxy.t = H.Wl_seat.get_keyboard host @@ H.Wl_keyboard.v5 @@ object
@@ -331,7 +336,7 @@ let make_popup ~host_popup:h proxy =
   end
 
 let make_toplevel config ~host_toplevel:h proxy =
-  let user_data = Relay (Toplevel h) in
+  let user_data = client_data (Toplevel h) in
   Proxy.Handler.attach proxy @@ C.Xdg_toplevel.v1 ~user_data @@ object (_ : 'a C.Xdg_toplevel.h1)
     method on_destroy = delete_with H.Xdg_toplevel.destroy h
     method on_move _ ~seat = H.Xdg_toplevel.move h ~seat:(to_host seat)
@@ -350,7 +355,7 @@ let make_toplevel config ~host_toplevel:h proxy =
   end
 
 let make_xdg_surface config ~host_xdg_surface:h ~surface:_ proxy =
-  let user_data = Relay (Xdg_surface h) in
+  let user_data = client_data (Xdg_surface h) in
   Proxy.Handler.attach proxy @@ C.Xdg_surface.v1 ~user_data @@ object (_ : _ C.Xdg_surface.h1)
     method on_ack_configure _ = H.Xdg_surface.ack_configure h
     method on_destroy = delete_with H.Xdg_surface.destroy h
@@ -377,7 +382,7 @@ let make_xdg_surface config ~host_xdg_surface:h ~surface:_ proxy =
   end
 
 let make_positioner ~host_positioner:h c =
-  let user_data = Relay (Xdg_positioner h) in
+  let user_data = client_data (Xdg_positioner h) in
   Proxy.Handler.attach c @@ C.Xdg_positioner.v1 ~user_data @@ object (_ : _ C.Xdg_positioner.h1)
     method on_destroy = delete_with H.Xdg_positioner.destroy h
     method on_set_anchor _ = H.Xdg_positioner.set_anchor h
@@ -402,7 +407,7 @@ let make_xdg_wm_base t proxy =
       method on_destroy = delete_with H.Xdg_wm_base.destroy host
 
       method on_get_xdg_surface _ xs ~surface =
-        let Surface s = user_data surface in
+        let Client_data (Surface s) = user_data surface in
         let host_xdg_surface = H.Xdg_wm_base.get_xdg_surface host ~surface:s.host_surface @@ H.Xdg_surface.v1 @@ object
             method on_configure _ ~serial = C.Xdg_surface.configure xs ~serial
           end
@@ -452,7 +457,7 @@ let make_data_offer t ~client_offer h =
       H.Wl_data_offer.receive h ~mime_type ~fd
     method on_set_actions _ = H.Wl_data_offer.set_actions h
   end in
-  let user_data = Relay (Host_data_offer c) in
+  let user_data = host_data (HD.Data_offer c) in
   Proxy.Handler.attach h @@ H.Wl_data_offer.v3 ~user_data @@ object (_ : _ H.Wl_data_offer.h3)
     method on_action _ = C.Wl_data_offer.action c
     method on_offer _ = C.Wl_data_offer.offer c
@@ -471,7 +476,7 @@ let make_data_source ~host_source c =
         Unix.close fd
       method on_target _ = C.Wl_data_source.target c
     end in
-  let user_data = Relay (Data_source h) in
+  let user_data = client_data (Data_source h) in
   Proxy.Handler.attach c @@ C.Wl_data_source.v3 ~user_data @@ object (_ : _ C.Wl_data_source.h3)
       method on_destroy = delete_with H.Wl_data_source.destroy h
       method on_offer _ = H.Wl_data_source.offer h
@@ -523,7 +528,7 @@ let make_gtk_data_offer t ~client_offer h =
       Pipes.with_wrapped_writeable t.virtwl fd @@ fun fd ->
       H.Gtk_primary_selection_offer.receive h ~mime_type ~fd
   end in
-  let user_data = Relay (Host_gtk_data_offer c) in
+  let user_data = host_data (HD.Gtk_data_offer c) in
   Proxy.Handler.attach h @@ H.Gtk_primary_selection_offer.v1 ~user_data @@ object
     method on_offer _ = C.Gtk_primary_selection_offer.offer c
   end
@@ -536,7 +541,7 @@ let make_gtk_primary_selection_source ~host_source c =
         C.Gtk_primary_selection_source.send c ~mime_type ~fd;
         Unix.close fd
     end in
-  let user_data = Relay (Gtk_source h) in
+  let user_data = client_data (Gtk_source h) in
   Proxy.Handler.attach c @@ C.Gtk_primary_selection_source.v1 ~user_data @@ object
       method on_destroy = delete_with H.Gtk_primary_selection_source.destroy h
       method on_offer _ = H.Gtk_primary_selection_source.offer h
