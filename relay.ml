@@ -21,9 +21,7 @@ type t = {
   host_registry : Wayland.Registry.t;
 }
 
-type region_data = {
-  host_region : [`V3] H.Wl_region.t;
-}
+type region_data = [`V3] H.Wl_region.t
 
 type buffer = {
   host_buffer : [`V1] H.Wl_buffer.t;
@@ -31,9 +29,7 @@ type buffer = {
   client_memory : Cstruct.t;
 }
 
-type seat = {
-  host_seat : [`V5] H.Wl_seat.t;
-}
+type seat = [`V5] H.Wl_seat.t
 
 type surface = {
   host_surface : [`V3] H.Wl_surface.t;
@@ -41,28 +37,14 @@ type surface = {
   mutable client_memory : Cstruct.t;
 }
 
-type output = {
-  host_output : ([`Wl_output], [`V2], [`Client]) Proxy.t;
-}
-
-type toplevel = {
-  host_toplevel : ([`Xdg_toplevel], [`V1], [`Client]) Proxy.t;
-}
-
-type host_output = {
-  client_output : ([`Wl_output], [`V1], [`Server]) Proxy.t;
-}
-
-type host_surface = {
-  client_surface : ([`Wl_surface], [`V3], [`Server]) Proxy.t;
-}
-
-type host_data_offer = ([`Wl_data_offer], [`V3], [`Server]) Proxy.t
-type data_source = ([`Wl_data_source], [`V3], [`Client]) Proxy.t
-
-type host_gtk_data_offer = ([`Gtk_primary_selection_offer], [`V1], [`Server]) Proxy.t
-type gtk_source = ([`Gtk_primary_selection_source], [`V1], [`Client]) Proxy.t
-
+type output = [`V2] H.Wl_output.t
+type toplevel = [`V1] H.Xdg_toplevel.t
+type host_output = [`V1] C.Wl_output.t
+type host_surface = [`V3] C.Wl_surface.t
+type host_data_offer = [`V3] C.Wl_data_offer.t
+type data_source = [`V3] H.Wl_data_source.t
+type host_gtk_data_offer = [`V1] C.Gtk_primary_selection_offer.t
+type gtk_source = [`V1] H.Gtk_primary_selection_source.t
 type xdg_surface = [`V1] H.Xdg_surface.t
 type xdg_positioner = [`V1] H.Xdg_positioner.t
 
@@ -92,57 +74,27 @@ let user_data (proxy : ('a, _, 'role) Proxy.t) : ('a, 'role) user_data =
   | S.No_data -> Fmt.failwith "No data attached to %a!" Proxy.pp proxy
   | _ -> Fmt.failwith "Unexpected data attached to %a!" Proxy.pp proxy
 
-let client_output h =
-  let Host_output { client_output } = user_data h in
-  client_output
+let to_client (type a) (h : (a, 'v, [`Client]) Proxy.t) : (a, 'v, [`Server]) Proxy.t =
+  let cv = Proxy.cast_version in
+  match user_data h with
+  | Host_output c -> cv c
+  | Host_surface c -> cv c
+  | Host_data_offer c -> cv c
+  | Host_gtk_data_offer c -> cv c
 
-let client_surface h =
-  let Host_surface { client_surface } = user_data h in
-  client_surface
-
-let client_data_offer h =
-  let Host_data_offer c = user_data h in
-  c
-
-let client_gtk_data_offer h =
-  let Host_gtk_data_offer c = user_data h in
-  c
-
-let host_surface surface =
-  let Surface x = user_data surface in
-  x.host_surface
-
-let host_seat c =
-  let Seat h = user_data c in
-  h.host_seat
-
-let host_output c =
-  let Output h = user_data c in
-  h.host_output
-
-let host_region c =
-  let Region h = user_data c in
-  h.host_region
-
-let host_toplevel c =
-  let Toplevel h = user_data c in
-  h.host_toplevel
-
-let host_xdg_surface c =
-  let Xdg_surface h = user_data c in
-  h
-
-let host_positioner c =
-  let Xdg_positioner h = user_data c in
-  h
-
-let host_data_source c =
-  let Data_source h = user_data c in
-  h
-
-let host_gtk_source c =
-  let Gtk_source h = user_data c in
-  h
+let to_host (type a) (c : (a, 'v, [`Server]) Proxy.t) : (a, 'v, [`Client]) Proxy.t =
+  let cv = Proxy.cast_version in
+  match user_data c with
+  | Surface x -> cv x.host_surface
+  | Seat x -> cv x
+  | Output x -> cv x
+  | Region x -> cv x
+  | Toplevel x -> cv x
+  | Xdg_surface x -> cv x
+  | Xdg_positioner x -> cv x
+  | Data_source x -> cv x
+  | Gtk_source x -> cv x
+  | Buffer x -> cv x.host_buffer
 
 let with_memory_fd t ~size f =
   let fd = Wayland_virtwl.alloc t.virtwl ~size in
@@ -158,7 +110,7 @@ let delete_with fn host client =
   fn host
 
 let make_region ~host_region:h r =
-  let user_data = Relay (Region { host_region = h }) in
+  let user_data = Relay (Region h) in
   Proxy.Handler.attach r @@ C.Wl_region.v3 ~user_data @@ object
     method on_add _ = H.Wl_region.add h
     method on_subtract _ = H.Wl_region.subtract h
@@ -192,8 +144,8 @@ let make_surface ~host_surface _t proxy =
         Proxy.delete callback
       in
       Proxy.Handler.attach callback @@ C.Wl_callback.v1 ()
-    method on_set_input_region _ ~region = H.Wl_surface.set_input_region host_surface ~region:(Option.map host_region region)
-    method on_set_opaque_region _ ~region = H.Wl_surface.set_opaque_region host_surface ~region:(Option.map host_region region)
+    method on_set_input_region _ ~region = H.Wl_surface.set_input_region host_surface ~region:(Option.map to_host region)
+    method on_set_opaque_region _ ~region = H.Wl_surface.set_opaque_region host_surface ~region:(Option.map to_host region)
     method on_set_buffer_scale _ = H.Wl_surface.set_buffer_scale host_surface
     method on_set_buffer_transform _ ~transform:_ = failwith "Not implemented"
   end
@@ -206,10 +158,10 @@ let make_compositor t proxy =
         make_region ~host_region region
 
       method on_create_surface _ surface =
-        let user_data = Relay (Host_surface { client_surface = surface }) in
+        let user_data = Relay (Host_surface surface ) in
         let host_surface = H.Wl_compositor.create_surface host @@ H.Wl_surface.v3 ~user_data @@ object (_ : _ H.Wl_surface.h3)
-            method on_enter _ ~output = C.Wl_surface.enter surface ~output:(client_output output)
-            method on_leave _ ~output = C.Wl_surface.leave surface ~output:(client_output output)
+            method on_enter _ ~output = C.Wl_surface.enter surface ~output:(to_client output)
+            method on_leave _ ~output = C.Wl_surface.leave surface ~output:(to_client output)
           end
         in
         make_surface ~host_surface t surface
@@ -220,8 +172,8 @@ let make_compositor t proxy =
 let make_subsurface ~host_subsurface:h c =
   Proxy.Handler.attach c @@ C.Wl_subsurface.v1 @@ object (_ : 'a C.Wl_subsurface.h1)
     method on_destroy = delete_with H.Wl_subsurface.destroy h
-    method on_place_above _ ~sibling = H.Wl_subsurface.place_above h ~sibling:(host_surface sibling)
-    method on_place_below _ ~sibling = H.Wl_subsurface.place_below h ~sibling:(host_surface sibling)
+    method on_place_above _ ~sibling = H.Wl_subsurface.place_above h ~sibling:(to_host sibling)
+    method on_place_below _ ~sibling = H.Wl_subsurface.place_below h ~sibling:(to_host sibling)
     method on_set_desync _ = H.Wl_subsurface.set_desync h
     method on_set_position _ = H.Wl_subsurface.set_position h
     method on_set_sync _ = H.Wl_subsurface.set_sync h
@@ -233,8 +185,8 @@ let make_subcompositor t proxy =
       method on_destroy = delete_with H.Wl_subcompositor.destroy h
 
       method on_get_subsurface _ subsurface ~surface ~parent =
-        let surface = host_surface surface in
-        let parent = host_surface parent in
+        let surface = to_host surface in
+        let parent = to_host parent in
         let host_subsurface = H.Wl_subcompositor.get_subsurface h ~surface ~parent @@ H.Wl_subsurface.v1 () in
         make_subsurface ~host_subsurface subsurface
     end
@@ -295,7 +247,7 @@ let make_shm_pool t ~host_shm ~fd:client_fd ~size:orig_size proxy =
 let make_output t c =
   let c = Proxy.cast_version c in
   let h =
-    let user_data = Relay (Host_output { client_output = c }) in
+    let user_data = Relay (Host_output c) in
     Wayland.Registry.bind t.host_registry @@ H.Wl_output.v2 ~user_data @@ object
       method on_done _ = C.Wl_output.done_ c
       method on_geometry _ = C.Wl_output.geometry c
@@ -304,7 +256,7 @@ let make_output t c =
     end
   in
   let _ : _ Proxy.t =
-    let user_data = Relay (Output { host_output = h }) in
+    let user_data = Relay (Output h) in
     Proxy.Service_handler.attach c @@ C.Wl_output.v2 ~user_data () in
   ()
 
@@ -317,15 +269,15 @@ let make_seat t c =
       method on_name _ = C.Wl_seat.name c
     end
   in
-  let user_data = Relay (Seat { host_seat = host }) in
+  let user_data = Relay (Seat host) in
   let _ : _ Proxy.t = Proxy.Service_handler.attach c @@ C.Wl_seat.v5 ~user_data @@ object
       method on_get_keyboard _ keyboard =
         let h : _ Proxy.t = H.Wl_seat.get_keyboard host @@ H.Wl_keyboard.v5 @@ object
             method on_keymap    _ ~format ~fd ~size =
               C.Wl_keyboard.keymap keyboard ~format ~fd ~size;
               Unix.close fd
-            method on_enter     _ ~serial ~surface = C.Wl_keyboard.enter keyboard ~serial ~surface:(client_surface surface)
-            method on_leave     _ ~serial ~surface = C.Wl_keyboard.leave keyboard ~serial ~surface:(client_surface surface)
+            method on_enter     _ ~serial ~surface = C.Wl_keyboard.enter keyboard ~serial ~surface:(to_client surface)
+            method on_leave     _ ~serial ~surface = C.Wl_keyboard.leave keyboard ~serial ~surface:(to_client surface)
             method on_key       _ = C.Wl_keyboard.key keyboard
             method on_modifiers _ = C.Wl_keyboard.modifiers keyboard
             method on_repeat_info _ = C.Wl_keyboard.repeat_info keyboard
@@ -342,14 +294,14 @@ let make_seat t c =
             method on_axis_source _ = C.Wl_pointer.axis_source c
             method on_axis_stop _ = C.Wl_pointer.axis_stop c
             method on_button _ = C.Wl_pointer.button c
-            method on_enter _ ~serial ~surface = C.Wl_pointer.enter c ~serial ~surface:(client_surface surface)
-            method on_leave _ ~serial ~surface = C.Wl_pointer.leave c ~serial ~surface:(client_surface surface)
+            method on_enter _ ~serial ~surface = C.Wl_pointer.enter c ~serial ~surface:(to_client surface)
+            method on_leave _ ~serial ~surface = C.Wl_pointer.leave c ~serial ~surface:(to_client surface)
             method on_motion _ = C.Wl_pointer.motion c
             method on_frame _ = C.Wl_pointer.frame c
           end
         in
         Proxy.Handler.attach c @@ C.Wl_pointer.v5 @@ object
-          method on_set_cursor _ ~serial ~surface = H.Wl_pointer.set_cursor h ~serial ~surface:(Option.map host_surface surface)
+          method on_set_cursor _ ~serial ~surface = H.Wl_pointer.set_cursor h ~serial ~surface:(Option.map to_host surface)
           method on_release = delete_with H.Wl_pointer.release h
         end
 
@@ -375,24 +327,24 @@ let make_shm t proxy =
 let make_popup ~host_popup:h proxy =
   Proxy.Handler.attach proxy @@ C.Xdg_popup.v1 @@ object (_ : 'a C.Xdg_popup.h1)
     method on_destroy = delete_with H.Xdg_popup.destroy h
-    method on_grab _ ~seat ~serial = H.Xdg_popup.grab h ~seat:(host_seat seat) ~serial
+    method on_grab _ ~seat ~serial = H.Xdg_popup.grab h ~seat:(to_host seat) ~serial
   end
 
 let make_toplevel config ~host_toplevel:h proxy =
-  let user_data = Relay (Toplevel { host_toplevel = h }) in
+  let user_data = Relay (Toplevel h) in
   Proxy.Handler.attach proxy @@ C.Xdg_toplevel.v1 ~user_data @@ object (_ : 'a C.Xdg_toplevel.h1)
     method on_destroy = delete_with H.Xdg_toplevel.destroy h
-    method on_move _ ~seat = H.Xdg_toplevel.move h ~seat:(host_seat seat)
-    method on_resize _ ~seat = H.Xdg_toplevel.resize h ~seat:(host_seat seat)
+    method on_move _ ~seat = H.Xdg_toplevel.move h ~seat:(to_host seat)
+    method on_resize _ ~seat = H.Xdg_toplevel.resize h ~seat:(to_host seat)
     method on_set_app_id _ = H.Xdg_toplevel.set_app_id h
-    method on_set_fullscreen _ ~output = H.Xdg_toplevel.set_fullscreen h ~output:(Option.map host_output output)
+    method on_set_fullscreen _ ~output = H.Xdg_toplevel.set_fullscreen h ~output:(Option.map to_host output)
     method on_set_max_size _ = H.Xdg_toplevel.set_max_size h
     method on_set_maximized _ = H.Xdg_toplevel.set_maximized h
     method on_set_min_size _ = H.Xdg_toplevel.set_min_size h
     method on_set_minimized _ = H.Xdg_toplevel.set_minimized h
-    method on_set_parent _ ~parent = H.Xdg_toplevel.set_parent h ~parent:(Option.map host_toplevel parent)
+    method on_set_parent _ ~parent = H.Xdg_toplevel.set_parent h ~parent:(Option.map to_host parent)
     method on_set_title _ ~title = H.Xdg_toplevel.set_title h ~title:(config.Config.tag ^ title)
-    method on_show_window_menu _ ~seat = H.Xdg_toplevel.show_window_menu h ~seat:(host_seat seat)
+    method on_show_window_menu _ ~seat = H.Xdg_toplevel.show_window_menu h ~seat:(to_host seat)
     method on_unset_fullscreen _ = H.Xdg_toplevel.unset_fullscreen h
     method on_unset_maximized _ = H.Xdg_toplevel.unset_maximized h
   end
@@ -404,8 +356,8 @@ let make_xdg_surface config ~host_xdg_surface:h ~surface:_ proxy =
     method on_destroy = delete_with H.Xdg_surface.destroy h
 
     method on_get_popup _ popup ~parent ~positioner =
-      let parent = Option.map host_xdg_surface parent in
-      let positioner = host_positioner positioner in
+      let parent = Option.map to_host parent in
+      let positioner = to_host positioner in
       let host_popup = H.Xdg_surface.get_popup h ~parent ~positioner @@ H.Xdg_popup.v1 @@ object
           method on_popup_done _ = C.Xdg_popup.popup_done popup
           method on_configure _ = C.Xdg_popup.configure popup
@@ -473,7 +425,7 @@ let make_zxdg_output_manager_v1 t proxy =
       method on_destroy = delete_with H.Zxdg_output_manager_v1.destroy host
 
       method on_get_xdg_output _ c ~output =
-        let output = host_output output in
+        let output = to_host output in
         let h = H.Zxdg_output_manager_v1.get_xdg_output host ~output @@ H.Zxdg_output_v1.v3 @@ object
             method on_description _ = C.Zxdg_output_v1.description c
             method on_done _ = C.Zxdg_output_v1.done_ c
@@ -531,19 +483,19 @@ let make_data_device t ~host_device c =
       method on_data_offer _ offer = make_data_offer t ~client_offer:(C.Wl_data_device.data_offer c) offer
       method on_drop _ = C.Wl_data_device.drop c
       method on_enter _ ~serial ~surface ~x ~y offer =
-        C.Wl_data_device.enter c ~serial ~surface:(client_surface surface) ~x ~y (Option.map client_data_offer offer)
+        C.Wl_data_device.enter c ~serial ~surface:(to_client surface) ~x ~y (Option.map to_client offer)
       method on_leave _ = C.Wl_data_device.leave c
       method on_motion _ = C.Wl_data_device.motion c
-      method on_selection _ offer = C.Wl_data_device.selection c (Option.map client_data_offer offer)
+      method on_selection _ offer = C.Wl_data_device.selection c (Option.map to_client offer)
     end in
   Proxy.Handler.attach c @@ C.Wl_data_device.v3 @@ object (_ : _ C.Wl_data_device.h2)
     method on_release = delete_with H.Wl_data_device.release h
-    method on_set_selection _ ~source = H.Wl_data_device.set_selection h ~source:(Option.map host_data_source source)
+    method on_set_selection _ ~source = H.Wl_data_device.set_selection h ~source:(Option.map to_host source)
     method on_start_drag _ ~source ~origin ~icon =
       H.Wl_data_device.start_drag h
-        ~source:(Option.map host_data_source source)
-        ~origin:(host_surface origin)
-        ~icon:(Option.map host_surface icon)
+        ~source:(Option.map to_host source)
+        ~origin:(to_host origin)
+        ~icon:(Option.map to_host icon)
   end
 
 let make_data_device_manager t proxy =
@@ -553,7 +505,7 @@ let make_data_device_manager t proxy =
       method on_create_data_source _ c =
         make_data_source c ~host_source:(H.Wl_data_device_manager.create_data_source host)
       method on_get_data_device _ c ~seat =
-        let seat = host_seat seat in
+        let seat = to_host seat in
         make_data_device t c ~host_device:(H.Wl_data_device_manager.get_data_device host ~seat)
     end
   in
@@ -593,12 +545,12 @@ let make_gtk_primary_selection_source ~host_source c =
 let make_gtk_primary_selection_device t ~host_device c =
   let h = host_device @@ H.Gtk_primary_selection_device.v1 @@ object (_ : _ H.Gtk_primary_selection_device.h1)
       method on_data_offer _ offer = make_gtk_data_offer t ~client_offer:(C.Gtk_primary_selection_device.data_offer c) offer
-      method on_selection _ offer = C.Gtk_primary_selection_device.selection c (Option.map client_gtk_data_offer offer)
+      method on_selection _ offer = C.Gtk_primary_selection_device.selection c (Option.map to_client offer)
     end in
   Proxy.Handler.attach c @@ C.Gtk_primary_selection_device.v1 @@ object
     method on_destroy = delete_with H.Gtk_primary_selection_device.destroy h
     method on_set_selection _ ~source =
-      let source = Option.map host_gtk_source source in
+      let source = Option.map to_host source in
       H.Gtk_primary_selection_device.set_selection h ~source
   end
 
@@ -611,7 +563,7 @@ let make_gtk_primary_selection_device_manager t proxy =
         make_gtk_primary_selection_source ~host_source source
       method on_destroy = delete_with H.Gtk_primary_selection_device_manager.destroy h
       method on_get_device _ dev ~seat =
-        let seat = host_seat seat in
+        let seat = to_host seat in
         let host_device = H.Gtk_primary_selection_device_manager.get_device h ~seat in
         make_gtk_primary_selection_device t ~host_device dev
     end
