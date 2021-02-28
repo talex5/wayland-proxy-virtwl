@@ -154,7 +154,7 @@ let make_surface ~host_surface _t c =
     method on_set_input_region _ ~region = H.Wl_surface.set_input_region h ~region:(Option.map to_host region)
     method on_set_opaque_region _ ~region = H.Wl_surface.set_opaque_region h ~region:(Option.map to_host region)
     method on_set_buffer_scale _ = H.Wl_surface.set_buffer_scale h
-    method on_set_buffer_transform _ ~transform:_ = failwith "Not implemented"
+    method on_set_buffer_transform _ = H.Wl_surface.set_buffer_transform h
   end
 
 let make_compositor t bind proxy =
