@@ -25,7 +25,7 @@ let draw_frame t =
   let stride = t.width * 4 in
   let size = t.height * stride in
   let pool, data = with_memory_fd t.virtwl ~size (fun fd ->
-      let pool = Wl_shm.create_pool t.shm (Wl_shm_pool.v1 ()) ~fd ~size:(Int32.of_int size) in
+      let pool = Wl_shm.create_pool t.shm (new Wl_shm_pool.handlers) ~fd ~size:(Int32.of_int size) in
       let ba = Wayland_virtwl.map_file fd Bigarray.Int32 ~n_elements:(t.height * t.width) in
       pool, Bigarray.reshape_2 ba t.height t.width
     ) in
@@ -36,7 +36,8 @@ let draw_frame t =
       ~height:(Int32.of_int t.height)
       ~stride:(Int32.of_int stride)
       ~format:Wl_shm.Format.Xrgb8888
-    @@ Wl_buffer.v1 @@ object
+    @@ object
+      inherit [_] Wl_buffer.handlers
       method on_release = Wl_buffer.destroy
     end
   in
@@ -67,36 +68,45 @@ let () =
         | Error ex -> raise ex
       );
     let* r = Wayland.Registry.of_display display in
-    let comp = Wayland.Registry.bind r @@ Wl_compositor.v4 () in
-    let xdg_wm_base = Wayland.Registry.bind r @@ Xdg_wm_base.v1 @@ object
+    let comp = Wayland.Registry.bind r @@ new Wl_compositor.v4 in
+    let xdg_wm_base = Wayland.Registry.bind r @@ object
+        inherit Xdg_wm_base.v1
         method on_ping = Xdg_wm_base.pong
       end in
-    let shm = Wayland.Registry.bind r @@ Wl_shm.v1 @@ object
+    let shm = Wayland.Registry.bind r @@ object
+        inherit Wl_shm.v1
         method on_format _ ~format:_ = ()
       end in
-    let seat = Wayland.Registry.bind r @@ Wl_seat.v1 @@ object
+    let seat = Wayland.Registry.bind r @@ object
+        inherit Wl_seat.v1
         method on_capabilities _ ~capabilities:_ = ()
+        method on_name _ ~name:_ = ()
       end in
-    let _keyboard = Wl_seat.get_keyboard seat @@ Wl_keyboard.v1 @@ object
+    let _keyboard = Wl_seat.get_keyboard seat @@ object
+        inherit [_] Wl_keyboard.handlers
         method on_enter _ ~serial:_ ~surface:_ ~keys:_ = ()
         method on_key _ ~serial:_ ~time:_ ~key:_ ~state:_ = ()
         method on_keymap _ ~format:_ ~fd ~size:_ = Unix.close fd
         method on_leave _ ~serial:_ ~surface:_ = ()
         method on_modifiers _ ~serial:_ ~mods_depressed:_ ~mods_latched:_ ~mods_locked:_ ~group:_ = ()
+        method on_repeat_info _ ~rate:_ ~delay:_ = ()
       end in
-    let surface = Wl_compositor.create_surface comp @@ Wl_surface.v4 @@ object
+    let surface = Wl_compositor.create_surface comp @@ object
+        inherit [_] Wl_surface.handlers
         method on_enter _ ~output:_ = ()
         method on_leave _ ~output:_ = ()
       end in
     let t = { virtwl; shm; surface; scroll = 0; width = 0; height = 0; fg = 0xFFEEEEEEl } in
     let closed, set_closed = Lwt.wait () in
     let configured, set_configured = Lwt.wait () in
-    let xdg_surface = Xdg_wm_base.get_xdg_surface xdg_wm_base ~surface @@ Xdg_surface.v1 @@ object
+    let xdg_surface = Xdg_wm_base.get_xdg_surface xdg_wm_base ~surface @@ object
+        inherit [_] Xdg_surface.handlers
         method on_configure p ~serial =
           Xdg_surface.ack_configure p ~serial;
           if Lwt.is_sleeping configured then Lwt.wakeup set_configured ()
     end in
-    let toplevel = Xdg_surface.get_toplevel xdg_surface @@ Xdg_toplevel.v1 @@ object
+    let toplevel = Xdg_surface.get_toplevel xdg_surface @@ object
+        inherit [_] Xdg_toplevel.handlers
         method on_close _ = Lwt.wakeup set_closed ()
         method on_configure _ ~width ~height ~states:_ =
           t.width <- if width = 0l then 640 else Int32.to_int width;
