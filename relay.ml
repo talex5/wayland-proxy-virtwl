@@ -101,12 +101,6 @@ let to_host (type a) (c : (a, 'v, [`Server]) Proxy.t) : (a, 'v, [`Client]) Proxy
   | Gtk_source x -> cv x
   | Buffer x -> cv x.host_buffer
 
-let with_memory_fd t ~size f =
-  let fd = Wayland_virtwl.alloc t.virtwl ~size in
-  Fun.protect
-    (fun () -> f fd)
-    ~finally:(fun () -> Unix.close fd)
-
 (* When the client asks to destroy something, delay the ack until the host object is destroyed.
    This means the client sees events in the usual order, and means we can continue forwarding
    any events the host sends before hearing about the deletion. *)
@@ -216,7 +210,7 @@ let make_shm_pool t ~host_shm ~fd:client_fd ~size:orig_size proxy =
   let alloc ~size =
     let client_memory_pool = Unix.map_file client_fd Bigarray.Char Bigarray.c_layout true [| Int32.to_int size |] in
     let host_pool, host_memory_pool =
-      with_memory_fd t ~size:(Int32.to_int size) (fun fd ->
+      Wayland_virtwl.with_memory_fd t.virtwl ~size:(Int32.to_int size) (fun fd ->
           let host_pool = H.Wl_shm.create_pool host_shm ~fd ~size @@ H.Wl_shm_pool.v1 () in
           let host_memory = Wayland_virtwl.map_file fd Bigarray.Char ~n_elements:(Int32.to_int size) in
           host_pool, host_memory

@@ -43,3 +43,9 @@ let pipe_read t =
 
 let pipe_write t =
   virtwl_pipe_write t
+
+let with_memory_fd t ~size f =
+  let fd = alloc t ~size in
+  Fun.protect
+    (fun () -> f fd)
+    ~finally:(fun () -> Unix.close fd)
