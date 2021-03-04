@@ -14,7 +14,7 @@ let trace = function
 *)
   | _ -> true
 
-module Host : Display.TRACE = struct
+module Host : Client.TRACE = struct
   type role = [`Client]
 
   let inbound (type a) (proxy : (a, _, _) Proxy.t) msg =

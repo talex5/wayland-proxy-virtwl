@@ -62,7 +62,7 @@ let () =
     let fd = Unix.(openfile "/dev/wl0" [O_RDWR; O_CLOEXEC] 0x600) in
     let virtwl = Wayland_virtwl.of_fd fd in
     let transport = Wayland_virtwl.new_context virtwl in
-    let display, conn_closed = Wayland.Display.connect transport in
+    let display, conn_closed = Wayland.Client.connect transport in
     Lwt.on_success conn_closed (function
         | Ok () -> ()
         | Error ex -> raise ex

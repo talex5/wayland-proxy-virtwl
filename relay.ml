@@ -640,9 +640,7 @@ let make_gtk_primary_selection_device_manager ~virtwl bind proxy =
       make_gtk_primary_selection_device ~virtwl ~host_device dev
   end
 
-type entry = Entry : int * (module Metadata.S) -> entry
-
-let entry ~max_version m = Entry (max_version, m)
+type entry = Entry : int32 * (module Metadata.S) -> entry
 
 let pp_closed f = function
   | Ok () -> Fmt.string f "closed connection"
@@ -654,27 +652,26 @@ let registry =
   let open Wayland_protocols.Xdg_output_unstable_v1_proto in
   let open Wayland_protocols.Gtk_primary_selection_proto in
   [
-    entry ~max_version:4 (module Wl_compositor);
-    entry ~max_version:1 (module Wl_subcompositor);
-    entry ~max_version:1 (module Wl_shm);
-    entry ~max_version:1 (module Xdg_wm_base);
-    entry ~max_version:2 (module Wl_output);
-    entry ~max_version:3 (module Wl_data_device_manager);
-    entry ~max_version:3 (module Zxdg_output_manager_v1);
-    entry ~max_version:1 (module Gtk_primary_selection_device_manager);
-    entry ~max_version:5 (module Wl_seat); (* Must come after gtk, or evince crashes *)
+    (module Wl_compositor : Metadata.S);
+    (module Wl_subcompositor);
+    (module Wl_shm);
+    (module Xdg_wm_base);
+    (module Wl_output);
+    (module Wl_data_device_manager);
+    (module Zxdg_output_manager_v1);
+    (module Gtk_primary_selection_device_manager);
+    (module Wl_seat); (* Must come after gtk, or evince crashes *)
   ]
 
 let make_registry t reg =
   let registry =
-    registry |> List.filter_map (fun entry ->
-        let Entry (our_max_version, (module M)) = entry in
+    registry |> List.filter_map (fun (module M : Metadata.S) ->
         match Registry.get t.host_registry M.interface with
         | [] ->
           Log.info (fun f -> f "Host doesn't support service %s, so skipping" M.interface);
           None
         | { Registry.name; version = host_version } :: _ ->
-          let max_version = min our_max_version (Int32.to_int host_version) in
+          let max_version = min M.version host_version in
           Some (name, Entry (max_version, (module M)))
       )
     |> Array.of_list
@@ -687,9 +684,9 @@ let make_registry t reg =
       let name = Int32.to_int name in
       if name < 0 || name >= Array.length registry then Fmt.failwith "Bad registry entry name %d" name;
       let host_name, Entry (max_version, (module M)) = registry.(name) in
-      let requested_version = Int32.to_int (Proxy.version proxy) in
+      let requested_version = Proxy.version proxy in
       if requested_version > max_version then
-        Fmt.failwith "Client asked for %S v%d, but we only support up to %d" M.interface requested_version max_version;
+        Fmt.failwith "Client asked for %S v%lu, but we only support up to %lu" M.interface requested_version max_version;
       let client_interface = Proxy.interface proxy in
       if client_interface <> M.interface then
         Fmt.failwith "Entry %d has type %S, client expected %S!" name M.interface client_interface;
@@ -713,7 +710,7 @@ let make_registry t reg =
   end;
   registry |> Array.iteri (fun name (_, entry) ->
       let Entry (version, (module M)) = entry in
-      C.Wl_registry.global reg ~name:(Int32.of_int name) ~interface:M.interface ~version:(Int32.of_int version)
+      C.Wl_registry.global reg ~name:(Int32.of_int name) ~interface:M.interface ~version
     )
 
 let handle ~config client =
@@ -721,7 +718,7 @@ let handle ~config client =
   let fd = Unix.(openfile "/dev/wl0" [O_RDWR; O_CLOEXEC] 0x600) in
   let virtwl = Wayland_virtwl.of_fd fd in
   let host_transport = Wayland_virtwl.new_context virtwl in
-  let display, host_closed = Wayland.Display.connect ~trace:(module Trace.Host) host_transport in
+  let display, host_closed = Wayland.Client.connect ~trace:(module Trace.Host) host_transport in
   let* host_registry = Wayland.Registry.of_display display in
   let t = {
     virtwl;
@@ -734,7 +731,7 @@ let handle ~config client =
       method on_get_registry _ ref = make_registry t ref
       method on_sync _ cb =
         Proxy.Handler.attach cb @@ new C.Wl_callback.handlers;
-        let h : _ Proxy.t = H.Wl_display.sync (Display.wl_display display) @@ object
+        let h : _ Proxy.t = H.Wl_display.sync (Client.wl_display display) @@ object
             inherit [_] H.Wl_callback.handlers
             method on_done ~callback_data =
               C.Wl_callback.done_ cb ~callback_data
