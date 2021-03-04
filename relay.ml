@@ -21,6 +21,7 @@ module H = struct
   include Wayland_protocols.Xdg_shell_client
   include Wayland_protocols.Xdg_output_unstable_v1_client
   include Wayland_protocols.Gtk_primary_selection_client
+  include Wayland_protocols.Server_decoration_client
 end
 
 (* Modules we use to interact with clients (to which we are a server). *)
@@ -29,6 +30,16 @@ module C = struct
   include Wayland_protocols.Xdg_shell_server
   include Wayland_protocols.Xdg_output_unstable_v1_server
   include Wayland_protocols.Gtk_primary_selection_server
+  include Wayland_protocols.Server_decoration_server
+end
+
+(* Metadata for the protocols we use. *)
+module Protocols = struct
+  include Wayland_proto
+  include Wayland_protocols.Xdg_shell_proto
+  include Wayland_protocols.Xdg_output_unstable_v1_proto
+  include Wayland_protocols.Gtk_primary_selection_proto
+  include Wayland_protocols.Server_decoration_proto
 end
 
 type t = {
@@ -491,6 +502,31 @@ let make_zxdg_output_manager_v1 bind proxy =
       make_zxdg_output ~host_xdg_output:(H.Zxdg_output_manager_v1.get_xdg_output h ~output) c
   end
 
+let make_kde_decoration ~host_decoration c =
+  let h = host_decoration @@ object
+      inherit [_] H.Org_kde_kwin_server_decoration.handlers
+      method on_mode _ = C.Org_kde_kwin_server_decoration.mode c
+    end
+  in
+  Proxy.Handler.attach c @@ object
+    inherit [_] C.Org_kde_kwin_server_decoration.handlers
+    method on_release = delete_with H.Org_kde_kwin_server_decoration.release h
+    method on_request_mode _ = H.Org_kde_kwin_server_decoration.request_mode h
+  end
+
+let make_kde_decoration_manager bind c =
+  let h = bind @@ object
+      inherit H.Org_kde_kwin_server_decoration_manager.v1
+      method on_default_mode _ = C.Org_kde_kwin_server_decoration_manager.default_mode c
+    end
+  in
+  Proxy.Handler.attach c @@ object
+    inherit [_] C.Org_kde_kwin_server_decoration_manager.handlers
+    method on_create _ decoration ~surface =
+      let surface = to_host surface in
+      make_kde_decoration ~host_decoration:(H.Org_kde_kwin_server_decoration_manager.create h ~surface) decoration
+  end
+
 let make_data_offer ~virtwl ~client_offer h =
   let c = client_offer @@ object
       inherit [_] C.Wl_data_offer.handlers
@@ -647,10 +683,7 @@ let pp_closed f = function
   | Error ex -> Fmt.pf f "connection failed: %a" Fmt.exn ex
 
 let registry =
-  let open Wayland_proto in
-  let open Wayland_protocols.Xdg_shell_proto in
-  let open Wayland_protocols.Xdg_output_unstable_v1_proto in
-  let open Wayland_protocols.Gtk_primary_selection_proto in
+  let open Protocols in
   [
     (module Wl_compositor : Metadata.S);
     (module Wl_subcompositor);
@@ -661,6 +694,7 @@ let registry =
     (module Zxdg_output_manager_v1);
     (module Gtk_primary_selection_device_manager);
     (module Wl_seat); (* Must come after gtk, or evince crashes *)
+    (module Org_kde_kwin_server_decoration_manager);
   ]
 
 let make_registry t reg =
@@ -691,10 +725,7 @@ let make_registry t reg =
       if client_interface <> M.interface then
         Fmt.failwith "Entry %d has type %S, client expected %S!" name M.interface client_interface;
       let bind x = H.Wl_registry.bind (Registry.wl_registry t.host_registry) ~name:host_name (x, Proxy.version proxy) in
-      let open Wayland_proto in
-      let open Wayland_protocols.Xdg_shell_proto in
-      let open Wayland_protocols.Xdg_output_unstable_v1_proto in
-      let open Wayland_protocols.Gtk_primary_selection_proto in
+      let open Protocols in
       let proxy = Proxy.cast_version proxy in
       match Proxy.ty proxy with
       | Wl_compositor.T -> make_compositor bind proxy
@@ -706,6 +737,7 @@ let make_registry t reg =
       | Gtk_primary_selection_device_manager.T -> make_gtk_primary_selection_device_manager ~virtwl:t.virtwl bind proxy
       | Xdg_wm_base.T -> make_xdg_wm_base ~tag:t.config.tag bind proxy
       | Zxdg_output_manager_v1.T -> make_zxdg_output_manager_v1 bind proxy
+      | Org_kde_kwin_server_decoration_manager.T -> make_kde_decoration_manager bind proxy
       | _ -> Fmt.failwith "Invalid service name for %a" Proxy.pp proxy
   end;
   registry |> Array.iteri (fun name (_, entry) ->
