@@ -491,7 +491,7 @@ let make_zxdg_output ~host_xdg_output c =
 
 let make_zxdg_output_manager_v1 bind proxy =
   let proxy = Proxy.cast_version proxy in
-  let h = bind @@ new H.Zxdg_output_manager_v1.v3 in
+  let h = bind @@ new H.Zxdg_output_manager_v1.v1 in
   Proxy.Handler.attach proxy @@ object
     inherit [_] C.Zxdg_output_manager_v1.handlers
 
@@ -599,7 +599,7 @@ let make_data_device ~virtwl ~host_device c =
 
 let make_data_device_manager ~virtwl bind proxy =
   let proxy = Proxy.cast_version proxy in
-  let h = bind @@ new H.Wl_data_device_manager.v3 in
+  let h = cv @@ bind @@ new H.Wl_data_device_manager.v1 in
   Proxy.Handler.attach proxy @@ object
     inherit [_] C.Wl_data_device_manager.handlers
     method on_create_data_source _ c =
@@ -724,7 +724,10 @@ let make_registry t reg =
       let client_interface = Proxy.interface proxy in
       if client_interface <> M.interface then
         Fmt.failwith "Entry %d has type %S, client expected %S!" name M.interface client_interface;
-      let bind x = H.Wl_registry.bind (Registry.wl_registry t.host_registry) ~name:host_name (x, Proxy.version proxy) in
+      let bind x =
+        assert (x#min_version = 1l);
+        H.Wl_registry.bind (Registry.wl_registry t.host_registry) ~name:host_name (x, Proxy.version proxy)
+      in
       let open Protocols in
       let proxy = Proxy.cast_version proxy in
       match Proxy.ty proxy with
