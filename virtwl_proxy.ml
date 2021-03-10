@@ -8,7 +8,7 @@ let rec listen ~config socket =
 
 let () =
   Logs.set_reporter (Logs_fmt.reporter ());
-  (* Logs.(set_level (Some Info)); *)
+  Logs.(set_level (Some Info));
   Printexc.record_backtrace true
 
 let is_listening path =

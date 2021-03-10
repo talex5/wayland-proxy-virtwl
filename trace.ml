@@ -18,7 +18,7 @@ module Host : Client.TRACE = struct
   type role = [`Client]
 
   let inbound (type a) (proxy : (a, _, _) Proxy.t) msg =
-    Log.info (fun f ->
+    Log.debug (fun f ->
         let (module M : Metadata.S with type t = a) = Proxy.metadata proxy in
         if trace M.interface then (
           let msg_name, arg_info = M.events (Msg.op msg) in
@@ -30,7 +30,7 @@ module Host : Client.TRACE = struct
       )
 
   let outbound (type a) (proxy : (a, _, _) Proxy.t) msg =
-    Log.info (fun f ->
+    Log.debug (fun f ->
         let (module M) = Proxy.metadata proxy in
         if trace M.interface then (
           let msg_name, arg_info = M.requests (Msg.op msg) in
@@ -46,7 +46,7 @@ module Client : Server.TRACE = struct
   type role = [`Server]
 
   let inbound (type a) (proxy : (a, _, _) Proxy.t) msg =
-    Log.info (fun f ->
+    Log.debug (fun f ->
         let (module M : Metadata.S with type t = a) = Proxy.metadata proxy in
         if trace M.interface then (
           let msg_name, arg_info = M.requests (Msg.op msg) in
@@ -58,7 +58,7 @@ module Client : Server.TRACE = struct
       )
 
   let outbound (type a) (proxy : (a, _, _) Proxy.t) msg =
-    Log.info (fun f ->
+    Log.debug (fun f ->
         let (module M) = Proxy.metadata proxy in
         if trace M.interface then (
           let msg_name, arg_info = M.events (Msg.op msg) in
