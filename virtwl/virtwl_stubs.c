@@ -69,7 +69,7 @@ CAMLprim value ocaml_virtwl_recv(value val_fd, value val_buf, value val_off, val
   if (ioctl(Int_val(val_fd), VIRTWL_IOCTL_RECV, tx)) {
     uerror("VIRTWL_IOCTL_RECV failed", Nothing);
   };
-  memcpy(Caml_ba_data_val(val_buf) + Long_val(off), &tx->data, tx->len);
+  memcpy(Caml_ba_data_val(val_buf) + off, &tx->data, tx->len);
   res = Val_int(0);
   for (int i = 0; i < VIRTWL_SEND_MAX_ALLOCS; i++) {
     if (tx->fds[i] == -1)
