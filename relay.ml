@@ -136,10 +136,10 @@ let delete_with fn host client =
   fn host
 
 let make_region ~host_region r =
-  let h = host_region @@ new H.Wl_region.handlers in
+  let h = host_region @@ new H.Wl_region.v1 in
   let user_data = client_data (Region h) in
   Proxy.Handler.attach r @@ object
-    inherit [_] C.Wl_region.handlers
+    inherit [_] C.Wl_region.v1
     method! user_data = user_data
     method on_add _ = H.Wl_region.add h
     method on_subtract _ = H.Wl_region.subtract h
@@ -150,7 +150,7 @@ let make_surface ~host_surface c =
   let h =
     let user_data = host_data (HD.Surface c) in
     host_surface @@ object
-      inherit [_] H.Wl_surface.handlers
+      inherit [_] H.Wl_surface.v1
       method! user_data = user_data
       method on_enter _ ~output = C.Wl_surface.enter c ~output:(to_client output)
       method on_leave _ ~output = C.Wl_surface.leave c ~output:(to_client output)
@@ -159,7 +159,7 @@ let make_surface ~host_surface c =
   let h = Proxy.cast_version h in
   let data = { CD.host_surface = h; host_memory = Cstruct.empty; client_memory = Cstruct.empty } in
   Proxy.Handler.attach c @@ object
-    inherit [_] C.Wl_surface.handlers
+    inherit [_] C.Wl_surface.v1
     method! user_data = client_data (Surface data)
     method on_attach _ ~buffer ~x ~y =
       match buffer with
@@ -184,7 +184,7 @@ let make_surface ~host_surface c =
         C.Wl_callback.done_ callback ~callback_data;
         Proxy.delete callback
       in
-      Proxy.Handler.attach callback @@ new C.Wl_callback.handlers
+      Proxy.Handler.attach callback @@ new C.Wl_callback.v1
     method on_set_input_region _ ~region = H.Wl_surface.set_input_region h ~region:(Option.map to_host region)
     method on_set_opaque_region _ ~region = H.Wl_surface.set_opaque_region h ~region:(Option.map to_host region)
     method on_set_buffer_scale _ = H.Wl_surface.set_buffer_scale h
@@ -194,15 +194,15 @@ let make_surface ~host_surface c =
 let make_compositor bind proxy =
   let h = bind @@ new H.Wl_compositor.v1 in
   Proxy.Handler.attach proxy @@ object
-    inherit [_] C.Wl_compositor.handlers
+    inherit [_] C.Wl_compositor.v1
     method on_create_region _ = make_region ~host_region:(H.Wl_compositor.create_region h)
     method on_create_surface _ = make_surface ~host_surface:(H.Wl_compositor.create_surface h)
   end
 
 let make_subsurface ~host_subsurface c =
-  let h = host_subsurface @@ new H.Wl_subsurface.handlers in
+  let h = host_subsurface @@ new H.Wl_subsurface.v1 in
   Proxy.Handler.attach c @@ object
-    inherit [_] C.Wl_subsurface.handlers
+    inherit [_] C.Wl_subsurface.v1
     method on_destroy = delete_with H.Wl_subsurface.destroy h
     method on_place_above _ ~sibling = H.Wl_subsurface.place_above h ~sibling:(to_host sibling)
     method on_place_below _ ~sibling = H.Wl_subsurface.place_below h ~sibling:(to_host sibling)
@@ -214,7 +214,7 @@ let make_subsurface ~host_subsurface c =
 let make_subcompositor bind proxy =
   let h = bind @@ new H.Wl_subcompositor.v1 in
   Proxy.Handler.attach proxy @@ object
-    inherit [_] C.Wl_subcompositor.handlers
+    inherit [_] C.Wl_subcompositor.v1
     method on_destroy = delete_with H.Wl_subcompositor.destroy h
 
     method on_get_subsurface _ subsurface ~surface ~parent =
@@ -227,7 +227,7 @@ let make_subcompositor bind proxy =
 let make_buffer ~host_buffer ~host_memory ~client_memory proxy =
   let user_data = client_data (Buffer {host_buffer; host_memory; client_memory}) in
   Proxy.Handler.attach proxy @@ object
-    inherit [_] C.Wl_buffer.handlers
+    inherit [_] C.Wl_buffer.v1
     method! user_data = user_data
     method on_destroy = delete_with H.Wl_buffer.destroy host_buffer
   end
@@ -245,7 +245,7 @@ let make_shm_pool ~virtwl ~host_shm proxy ~fd:client_fd ~size:orig_size =
     let client_memory_pool = Unix.map_file client_fd Bigarray.Char Bigarray.c_layout true [| Int32.to_int size |] in
     let host_pool, host_memory_pool =
       Wayland_virtwl.with_memory_fd virtwl ~size:(Int32.to_int size) (fun fd ->
-          let host_pool = H.Wl_shm.create_pool host_shm ~fd ~size @@ new H.Wl_shm_pool.handlers in
+          let host_pool = H.Wl_shm.create_pool host_shm ~fd ~size @@ new H.Wl_shm_pool.v1 in
           let host_memory = Wayland_virtwl.map_file fd Bigarray.Char ~n_elements:(Int32.to_int size) in
           host_pool, host_memory
         )
@@ -256,7 +256,7 @@ let make_shm_pool ~virtwl ~host_shm proxy ~fd:client_fd ~size:orig_size =
   in
   let mapping = ref (alloc ~size:orig_size) in
   Proxy.Handler.attach proxy @@ object
-    inherit [_] C.Wl_shm_pool.handlers
+    inherit [_] C.Wl_shm_pool.v1
 
     method on_create_buffer _ buffer ~offset ~width ~height ~stride ~format =
       let len = Int32.to_int height * Int32.to_int stride in
@@ -265,7 +265,7 @@ let make_shm_pool ~virtwl ~host_shm proxy ~fd:client_fd ~size:orig_size =
       let host_buffer =
         H.Wl_shm_pool.create_buffer (!mapping).host_pool ~offset ~width ~height ~stride ~format
         @@ object
-          inherit [_] H.Wl_buffer.handlers
+          inherit [_] H.Wl_buffer.v1
           method on_release _ = C.Wl_buffer.release buffer
         end 
       in
@@ -285,7 +285,7 @@ let make_output bind c =
   let h =
     let user_data = host_data (HD.Output c) in
     bind @@ object
-      inherit H.Wl_output.v1
+      inherit [_] H.Wl_output.v1
       method! user_data = user_data
       method on_done _ = C.Wl_output.done_ (Proxy.cast_version c)
       method on_geometry _ = C.Wl_output.geometry c
@@ -295,7 +295,7 @@ let make_output bind c =
   in
   let user_data = client_data (Output h) in
   Proxy.Handler.attach c @@ object
-    inherit [_] C.Wl_output.handlers
+    inherit [_] C.Wl_output.v1
     method! user_data = user_data
     method on_release = delete_with H.Wl_output.release (cv h)
   end
@@ -304,7 +304,7 @@ let make_seat bind c =
   let c = Proxy.cast_version c in
   let cap_mask = C.Wl_seat.Capability.(Int32.logor keyboard pointer) in
   let host = bind @@ object
-      inherit H.Wl_seat.v1
+      inherit [_] H.Wl_seat.v1
 
       method on_capabilities _ ~capabilities =
         C.Wl_seat.capabilities c ~capabilities:(Int32.logand capabilities cap_mask)
@@ -314,11 +314,11 @@ let make_seat bind c =
   let host = cv host in
   let user_data = client_data (Seat host) in
   Proxy.Handler.attach c @@ object
-    inherit [_] C.Wl_seat.handlers
+    inherit [_] C.Wl_seat.v1
     method! user_data = user_data
     method on_get_keyboard _ keyboard =
       let h : _ Proxy.t = H.Wl_seat.get_keyboard host @@ object
-          inherit [_] H.Wl_keyboard.handlers
+          inherit [_] H.Wl_keyboard.v1
           method on_keymap    _ ~format ~fd ~size =
             C.Wl_keyboard.keymap keyboard ~format ~fd ~size;
             Unix.close fd
@@ -330,14 +330,14 @@ let make_seat bind c =
         end
       in
       Proxy.Handler.attach keyboard @@ object
-        inherit [_] C.Wl_keyboard.handlers
+        inherit [_] C.Wl_keyboard.v1
         method on_release = delete_with H.Wl_keyboard.release h
       end
 
     method on_get_pointer _ c =
       let c = cv c in
       let h : _ Proxy.t = H.Wl_seat.get_pointer host @@ object
-          inherit [_] H.Wl_pointer.handlers
+          inherit [_] H.Wl_pointer.v1
           method on_axis _ = C.Wl_pointer.axis c
           method on_axis_discrete _ = C.Wl_pointer.axis_discrete c
           method on_axis_source _ = C.Wl_pointer.axis_source c
@@ -350,7 +350,7 @@ let make_seat bind c =
         end
       in
       Proxy.Handler.attach c @@ object
-        inherit [_] C.Wl_pointer.handlers
+        inherit [_] C.Wl_pointer.v1
         method on_set_cursor _ ~serial ~surface = H.Wl_pointer.set_cursor h ~serial ~surface:(Option.map to_host surface)
         method on_release = delete_with H.Wl_pointer.release h
       end
@@ -362,25 +362,25 @@ let make_seat bind c =
 let make_shm ~virtwl bind c =
   let c = Proxy.cast_version c in
   let h = bind @@ object
-      inherit H.Wl_shm.v1
+      inherit [_] H.Wl_shm.v1
       method on_format _ = C.Wl_shm.format c
     end
   in
   Proxy.Handler.attach c @@ object
-    inherit [_] C.Wl_shm.handlers
+    inherit [_] C.Wl_shm.v1
     method on_create_pool _ = make_shm_pool ~virtwl ~host_shm:h
   end
 
 let make_popup ~host_popup c =
   let h = host_popup @@ object
-      inherit [_] H.Xdg_popup.handlers
+      inherit [_] H.Xdg_popup.v1
       method on_popup_done _ = C.Xdg_popup.popup_done c
       method on_configure _ = C.Xdg_popup.configure c
       method on_repositioned _ = C.Xdg_popup.repositioned c
     end
   in
   Proxy.Handler.attach c @@ object
-    inherit [_] C.Xdg_popup.handlers
+    inherit [_] C.Xdg_popup.v1
     method on_destroy = delete_with H.Xdg_popup.destroy h
     method on_grab _ ~seat = H.Xdg_popup.grab h ~seat:(to_host seat)
     method on_reposition _ ~positioner = H.Xdg_popup.reposition h ~positioner:(to_host positioner)
@@ -388,14 +388,14 @@ let make_popup ~host_popup c =
 
 let make_toplevel ~tag ~host_toplevel c =
   let h = host_toplevel @@ object
-      inherit [_] H.Xdg_toplevel.handlers
+      inherit [_] H.Xdg_toplevel.v1
       method on_close _ = C.Xdg_toplevel.close c
       method on_configure _ = C.Xdg_toplevel.configure c
     end
   in
   let user_data = client_data (Toplevel h) in
   Proxy.Handler.attach c @@ object
-    inherit [_] C.Xdg_toplevel.handlers
+    inherit [_] C.Xdg_toplevel.v1
     method! user_data = user_data
     method on_destroy = delete_with H.Xdg_toplevel.destroy h
     method on_move _ ~seat = H.Xdg_toplevel.move h ~seat:(to_host seat)
@@ -416,13 +416,13 @@ let make_toplevel ~tag ~host_toplevel c =
 let make_xdg_surface ~tag ~host_xdg_surface c =
   let c = cv c in
   let h = host_xdg_surface @@ object
-      inherit [_] H.Xdg_surface.handlers
+      inherit [_] H.Xdg_surface.v1
       method on_configure _ = C.Xdg_surface.configure c
     end
   in
   let user_data = client_data (Xdg_surface h) in
   Proxy.Handler.attach c @@ object
-    inherit [_] C.Xdg_surface.handlers
+    inherit [_] C.Xdg_surface.v1
     method! user_data = user_data
     method on_destroy = delete_with H.Xdg_surface.destroy h
     method on_ack_configure _ = H.Xdg_surface.ack_configure h
@@ -437,10 +437,10 @@ let make_xdg_surface ~tag ~host_xdg_surface c =
   end
 
 let make_positioner ~host_positioner c =
-  let h = host_positioner @@ new H.Xdg_positioner.handlers in
+  let h = host_positioner @@ new H.Xdg_positioner.v1 in
   let user_data = client_data (Xdg_positioner h) in
   Proxy.Handler.attach c @@ object
-    inherit [_] C.Xdg_positioner.handlers
+    inherit [_] C.Xdg_positioner.v1
     method! user_data = user_data
     method on_destroy = delete_with H.Xdg_positioner.destroy h
     method on_set_anchor _ = H.Xdg_positioner.set_anchor h
@@ -456,13 +456,13 @@ let make_positioner ~host_positioner c =
 
 let make_xdg_wm_base ~tag bind proxy =
   let h = bind @@ object
-      inherit H.Xdg_wm_base.v1
+      inherit [_] H.Xdg_wm_base.v1
       method on_ping _ = C.Xdg_wm_base.ping proxy
     end
   in
   let h = Proxy.cast_version h in
   Proxy.Handler.attach proxy @@ object
-    inherit [_] C.Xdg_wm_base.handlers
+    inherit [_] C.Xdg_wm_base.v1
 
     method on_destroy = delete_with H.Xdg_wm_base.destroy h
     method on_pong _ = H.Xdg_wm_base.pong h
@@ -477,7 +477,7 @@ let make_xdg_wm_base ~tag bind proxy =
 let make_zxdg_output ~host_xdg_output c =
   let c = cv c in
   let h = host_xdg_output @@ object
-      inherit [_] H.Zxdg_output_v1.handlers
+      inherit [_] H.Zxdg_output_v1.v1
       method on_description _ = C.Zxdg_output_v1.description c
       method on_done _ = C.Zxdg_output_v1.done_ c
       method on_logical_position _ = C.Zxdg_output_v1.logical_position c
@@ -485,7 +485,7 @@ let make_zxdg_output ~host_xdg_output c =
       method on_name _ = C.Zxdg_output_v1.name c
     end in
   Proxy.Handler.attach c @@ object
-    inherit [_] C.Zxdg_output_v1.handlers
+    inherit [_] C.Zxdg_output_v1.v1
     method on_destroy = delete_with H.Zxdg_output_v1.destroy h
   end
 
@@ -493,7 +493,7 @@ let make_zxdg_output_manager_v1 bind proxy =
   let proxy = Proxy.cast_version proxy in
   let h = bind @@ new H.Zxdg_output_manager_v1.v1 in
   Proxy.Handler.attach proxy @@ object
-    inherit [_] C.Zxdg_output_manager_v1.handlers
+    inherit [_] C.Zxdg_output_manager_v1.v1
 
     method on_destroy = delete_with H.Zxdg_output_manager_v1.destroy h
 
@@ -504,24 +504,24 @@ let make_zxdg_output_manager_v1 bind proxy =
 
 let make_kde_decoration ~host_decoration c =
   let h = host_decoration @@ object
-      inherit [_] H.Org_kde_kwin_server_decoration.handlers
+      inherit [_] H.Org_kde_kwin_server_decoration.v1
       method on_mode _ = C.Org_kde_kwin_server_decoration.mode c
     end
   in
   Proxy.Handler.attach c @@ object
-    inherit [_] C.Org_kde_kwin_server_decoration.handlers
+    inherit [_] C.Org_kde_kwin_server_decoration.v1
     method on_release = delete_with H.Org_kde_kwin_server_decoration.release h
     method on_request_mode _ = H.Org_kde_kwin_server_decoration.request_mode h
   end
 
 let make_kde_decoration_manager bind c =
   let h = bind @@ object
-      inherit H.Org_kde_kwin_server_decoration_manager.v1
+      inherit [_] H.Org_kde_kwin_server_decoration_manager.v1
       method on_default_mode _ = C.Org_kde_kwin_server_decoration_manager.default_mode c
     end
   in
   Proxy.Handler.attach c @@ object
-    inherit [_] C.Org_kde_kwin_server_decoration_manager.handlers
+    inherit [_] C.Org_kde_kwin_server_decoration_manager.v1
     method on_create _ decoration ~surface =
       let surface = to_host surface in
       make_kde_decoration ~host_decoration:(H.Org_kde_kwin_server_decoration_manager.create h ~surface) decoration
@@ -529,7 +529,7 @@ let make_kde_decoration_manager bind c =
 
 let make_data_offer ~virtwl ~client_offer h =
   let c = client_offer @@ object
-      inherit [_] C.Wl_data_offer.handlers
+      inherit [_] C.Wl_data_offer.v1
       method on_accept _ = H.Wl_data_offer.accept h
       method on_destroy c =
         delete_with H.Wl_data_offer.destroy h c;
@@ -544,7 +544,7 @@ let make_data_offer ~virtwl ~client_offer h =
     end in
   let user_data = host_data (HD.Data_offer c) in
   Proxy.Handler.attach h @@ object
-    inherit [_] H.Wl_data_offer.handlers
+    inherit [_] H.Wl_data_offer.v1
     method! user_data = user_data
     method on_action _ = C.Wl_data_offer.action c
     method on_offer _ = C.Wl_data_offer.offer c
@@ -555,7 +555,7 @@ let make_data_source ~host_source c =
   let c = cv c in
   let h =
     host_source @@ object
-      inherit [_] H.Wl_data_source.handlers
+      inherit [_] H.Wl_data_source.v1
       method on_action _ = C.Wl_data_source.action c
       method on_cancelled _ = C.Wl_data_source.cancelled c
       method on_dnd_drop_performed _ = C.Wl_data_source.dnd_drop_performed c
@@ -567,7 +567,7 @@ let make_data_source ~host_source c =
     end in
   let user_data = client_data (Data_source h) in
   Proxy.Handler.attach c @@ object
-    inherit [_] C.Wl_data_source.handlers
+    inherit [_] C.Wl_data_source.v1
     method! user_data = user_data
     method on_destroy = delete_with H.Wl_data_source.destroy h
     method on_offer _ = H.Wl_data_source.offer h
@@ -577,7 +577,7 @@ let make_data_source ~host_source c =
 let make_data_device ~virtwl ~host_device c =
   let c = cv c in
   let h = host_device @@ object
-      inherit [_] H.Wl_data_device.handlers
+      inherit [_] H.Wl_data_device.v1
       method on_data_offer _ offer = make_data_offer ~virtwl ~client_offer:(C.Wl_data_device.data_offer c) offer
       method on_drop _ = C.Wl_data_device.drop c
       method on_enter _ ~serial ~surface ~x ~y offer =
@@ -587,7 +587,7 @@ let make_data_device ~virtwl ~host_device c =
       method on_selection _ offer = C.Wl_data_device.selection c (Option.map to_client offer)
     end in
   Proxy.Handler.attach c @@ object
-    inherit [_] C.Wl_data_device.handlers
+    inherit [_] C.Wl_data_device.v1
     method on_release = delete_with H.Wl_data_device.release h
     method on_set_selection _ ~source = H.Wl_data_device.set_selection h ~source:(Option.map to_host source)
     method on_start_drag _ ~source ~origin ~icon =
@@ -601,7 +601,7 @@ let make_data_device_manager ~virtwl bind proxy =
   let proxy = Proxy.cast_version proxy in
   let h = cv @@ bind @@ new H.Wl_data_device_manager.v1 in
   Proxy.Handler.attach proxy @@ object
-    inherit [_] C.Wl_data_device_manager.handlers
+    inherit [_] C.Wl_data_device_manager.v1
     method on_create_data_source _ c =
       make_data_source c ~host_source:(H.Wl_data_device_manager.create_data_source h)
     method on_get_data_device _ c ~seat =
@@ -611,7 +611,7 @@ let make_data_device_manager ~virtwl bind proxy =
 
 let make_gtk_data_offer ~virtwl ~client_offer h =
   let c = client_offer @@ object
-      inherit [_] C.Gtk_primary_selection_offer.handlers
+      inherit [_] C.Gtk_primary_selection_offer.v1
 
       method on_destroy c =
         delete_with H.Gtk_primary_selection_offer.destroy h c;
@@ -625,7 +625,7 @@ let make_gtk_data_offer ~virtwl ~client_offer h =
     end in
   let user_data = host_data (HD.Gtk_data_offer c) in
   Proxy.Handler.attach h @@ object
-    inherit [_] H.Gtk_primary_selection_offer.handlers
+    inherit [_] H.Gtk_primary_selection_offer.v1
     method! user_data = user_data
     method on_offer _ = C.Gtk_primary_selection_offer.offer c
   end
@@ -633,7 +633,7 @@ let make_gtk_data_offer ~virtwl ~client_offer h =
 let make_gtk_primary_selection_source ~host_source c =
   let h =
     host_source @@ object
-      inherit [_] H.Gtk_primary_selection_source.handlers
+      inherit [_] H.Gtk_primary_selection_source.v1
       method on_cancelled _ = C.Gtk_primary_selection_source.cancelled c
       method on_send _ ~mime_type ~fd =
         C.Gtk_primary_selection_source.send c ~mime_type ~fd;
@@ -641,7 +641,7 @@ let make_gtk_primary_selection_source ~host_source c =
     end in
   let user_data = client_data (Gtk_source h) in
   Proxy.Handler.attach c @@ object
-    inherit [_] C.Gtk_primary_selection_source.handlers
+    inherit [_] C.Gtk_primary_selection_source.v1
     method! user_data = user_data
     method on_destroy = delete_with H.Gtk_primary_selection_source.destroy h
     method on_offer _ = H.Gtk_primary_selection_source.offer h
@@ -649,12 +649,12 @@ let make_gtk_primary_selection_source ~host_source c =
 
 let make_gtk_primary_selection_device ~virtwl ~host_device c =
   let h = host_device @@ object
-      inherit [_] H.Gtk_primary_selection_device.handlers
+      inherit [_] H.Gtk_primary_selection_device.v1
       method on_data_offer _ offer = make_gtk_data_offer ~virtwl ~client_offer:(C.Gtk_primary_selection_device.data_offer c) offer
       method on_selection _ offer = C.Gtk_primary_selection_device.selection c (Option.map to_client offer)
     end in
   Proxy.Handler.attach c @@ object
-    inherit [_] C.Gtk_primary_selection_device.handlers
+    inherit [_] C.Gtk_primary_selection_device.v1
     method on_destroy = delete_with H.Gtk_primary_selection_device.destroy h
     method on_set_selection _ ~source =
       let source = Option.map to_host source in
@@ -665,7 +665,7 @@ let make_gtk_primary_selection_device_manager ~virtwl bind proxy =
   let proxy = Proxy.cast_version proxy in
   let h = bind @@ new H.Gtk_primary_selection_device_manager.v1 in
   Proxy.Handler.attach proxy @@ object
-    inherit [_] C.Gtk_primary_selection_device_manager.handlers
+    inherit [_] C.Gtk_primary_selection_device_manager.v1
     method on_create_source _ source =
       let host_source = H.Gtk_primary_selection_device_manager.create_source h in
       make_gtk_primary_selection_source ~host_source source
@@ -711,7 +711,7 @@ let make_registry t reg =
     |> Array.of_list
   in
   Proxy.Handler.attach reg @@ object
-    inherit [_] C.Wl_registry.handlers
+    inherit [_] C.Wl_registry.v1
 
     method on_bind : type a. _ -> name:int32 -> (a, [`Unknown], _) Proxy.t -> unit =
       fun _ ~name proxy ->
@@ -762,12 +762,12 @@ let handle ~config client =
   } in
   let s : Server.t =
     Server.connect client_transport ~trace:(module Trace.Client) @@ object
-      inherit [_] C.Wl_display.handlers
+      inherit [_] C.Wl_display.v1
       method on_get_registry _ ref = make_registry t ref
       method on_sync _ cb =
-        Proxy.Handler.attach cb @@ new C.Wl_callback.handlers;
+        Proxy.Handler.attach cb @@ new C.Wl_callback.v1;
         let h : _ Proxy.t = H.Wl_display.sync (Client.wl_display display) @@ object
-            inherit [_] H.Wl_callback.handlers
+            inherit [_] H.Wl_callback.v1
             method on_done ~callback_data =
               C.Wl_callback.done_ cb ~callback_data
           end
