@@ -20,20 +20,20 @@ It is able to proxy Evince and Firefox at least.
 
 ## Installation
 
-Clone the repository (with submodules):
+Clone the repository:
 
 ```
-git clone --recursive https://github.com/talex5/wayland-virtwl-proxy.git
+git clone https://github.com/talex5/wayland-proxy-virtwl.git
 ```
 
 Then build with either opam (`opam install .`) or Nix (`nix-build .`).
 
 I use the following systemd file to run the proxy
-(in `~/.local/share/systemd/user/wayland-virtlw-proxy.service`):
+(in `~/.local/share/systemd/user/wayland-proxy-virtwl.service`):
 
 ```
 [Unit]
-Description=Wayland-virtwl-proxy
+Description=Wayland-proxy-virtwl
 
 [Service]
 ExecStart=/path/to/wayland-proxy-virtwl --tag="[my-vm] " --wayland-display wayland-0

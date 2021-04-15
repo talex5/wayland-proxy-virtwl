@@ -1,5 +1,5 @@
 (executable
-  (name virtwl_proxy)
+  (name main)
   (public_name wayland-proxy-virtwl)
   (libraries wayland wayland.protocols wayland_virtwl cmdliner))
 

@@ -13,8 +13,8 @@ let
         {
           owner = "ocaml";
           repo = "opam-repository";
-          rev = "7c396b25fe7954503325bd8f183d080d226dc202";
-          sha256 = "04s7vywhbl1c0ifflrv38s50sj4h7vhs55vyx4iihd6mcywy6xk3";
+          rev = "642695c133cb3161517a324f6c2268d8259b508a";
+          sha256 = "1vw62kqdiw3c29jssjn0zfs3khviqdf43afnrbqilk142cc4gjzh";
         };
         src = (pkgs.fetchFromGitHub) fetch;
       };
@@ -107,20 +107,6 @@ in
       };
       version = "1.0.4";
     };
-    conf-m4 = 
-    {
-      buildInputs = [ (pkgs.m4) ];
-      opamInputs = {
-      };
-      opamSrc = repoPath (repos.opam-repository.src) 
-      {
-        hash = "sha256:1jlhg718lz35jyr5w0sgvg5ycplhnd8653rc4980yci8p3z1vlxs";
-        package = "packages/conf-m4/conf-m4.1";
-      };
-      pname = "conf-m4";
-      src = null;
-      version = "1";
-    };
     cppo = 
     {
       opamInputs = 
@@ -148,20 +134,19 @@ in
       {
         dune = selection.dune;
         ocaml = selection.ocaml;
-        result = selection.result;
       };
       opamSrc = repoPath (repos.opam-repository.src) 
       {
-        hash = "sha256:1wi05gfxxhg8i2i2mdgigqq0cxc3dizxzr7j6729mq4mfb06gpxx";
-        package = "packages/csexp/csexp.1.4.0";
+        hash = "sha256:0yhsha07yvqkv0g891i3b34gsvml7q2a0l1fxkhisiq0i08smmg2";
+        package = "packages/csexp/csexp.1.5.1";
       };
       pname = "csexp";
       src = pkgs.fetchurl 
       {
-        sha256 = "0kinvwzbylcx2ky8s8a7ki1i0vql1lm2mdz8vqka20pihz56ygcf";
-        url = "https://github.com/ocaml-dune/csexp/releases/download/1.4.0/csexp-1.4.0.tbz";
+        sha256 = "00mc19f89pxpmjl62862ya5kjcfrl8rjzvs00j05h2m9bw3f81fn";
+        url = "https://github.com/ocaml-dune/csexp/releases/download/1.5.1/csexp-1.5.1.tbz";
       };
-      version = "1.4.0";
+      version = "1.5.1";
     };
     cstruct = 
     {
@@ -195,16 +180,16 @@ in
       };
       opamSrc = repoPath (repos.opam-repository.src) 
       {
-        hash = "sha256:1nifrwp9g1d9rxj184vvvldgm1151h28pmsnzfagxp0gj53pni64";
-        package = "packages/dune/dune.2.8.2";
+        hash = "sha256:0i9gliphdz2gm6y7x2a1s1sd9wnq31sj84r3bpwd6frykd9xlv9v";
+        package = "packages/dune/dune.2.8.5";
       };
       pname = "dune";
       src = pkgs.fetchurl 
       {
-        sha256 = "07mf6pnmv1a6wh4la45zf6cn6qy2vcmz4xgx0djj75kw1wiyii72";
-        url = "https://github.com/ocaml/dune/releases/download/2.8.2/dune-2.8.2.tbz";
+        sha256 = "0a9n8ilsi3kyx5xqvk5s7iikk6y3pkpm5mvsn5za5ivlzf1i40br";
+        url = "https://github.com/ocaml/dune/releases/download/2.8.5/dune-2.8.5.tbz";
       };
-      version = "2.8.2";
+      version = "2.8.5";
     };
     dune-configurator = 
     {
@@ -217,16 +202,16 @@ in
       };
       opamSrc = repoPath (repos.opam-repository.src) 
       {
-        hash = "sha256:18li0h84pnx743h6gn3gry7ygm3b7wnvmsvdjl71z5zm1qvfirlr";
-        package = "packages/dune-configurator/dune-configurator.2.8.2";
+        hash = "sha256:1ipr0wgyn4fq852swh1k8fld9bbk3c3l6j6c9fs3751wj0y7xsd4";
+        package = "packages/dune-configurator/dune-configurator.2.8.5";
       };
       pname = "dune-configurator";
       src = pkgs.fetchurl 
       {
-        sha256 = "07mf6pnmv1a6wh4la45zf6cn6qy2vcmz4xgx0djj75kw1wiyii72";
-        url = "https://github.com/ocaml/dune/releases/download/2.8.2/dune-2.8.2.tbz";
+        sha256 = "0a9n8ilsi3kyx5xqvk5s7iikk6y3pkpm5mvsn5za5ivlzf1i40br";
+        url = "https://github.com/ocaml/dune/releases/download/2.8.5/dune-2.8.5.tbz";
       };
-      version = "2.8.2";
+      version = "2.8.5";
     };
     fmt = 
     {
@@ -343,7 +328,7 @@ in
       };
       opamSrc = repoPath (repos.opam-repository.src) 
       {
-        hash = "sha256:1j9xgxnbgzrar4rwynm7jd0bi3f5qwwkgyxvk1pd8iazvn81pgya";
+        hash = "sha256:1j6sj1k8vh0p30fzl8bq470qsbiilnw7dkq1incpq5z2m7z5f1v3";
         package = "packages/ocaml/ocaml.4.10.0";
       };
       pname = "ocaml";
@@ -356,7 +341,7 @@ in
       };
       opamSrc = repoPath (repos.opam-repository.src) 
       {
-        hash = "sha256:1j4623nkx2jwgmx689m5z4i3i6fkqgk0m5jq8hqzi89gxmsnqb9x";
+        hash = "sha256:0sy4m5281kvzj9jszdi1dy634fd5kg4y0hn213mshvwjxl0iwi6y";
         package = "packages/ocaml-base-compiler/ocaml-base-compiler.4.10.0";
       };
       pname = "ocaml-base-compiler";
@@ -406,22 +391,21 @@ in
     {
       opamInputs = 
       {
-        conf-m4 = selection.conf-m4;
         graphics = selection.graphics or null;
         ocaml = selection.ocaml;
       };
       opamSrc = repoPath (repos.opam-repository.src) 
       {
-        hash = "sha256:0gipclfkvihny5ljh8pqyy36qjhfkfj2zvzcxf2dgzngs1y32id7";
-        package = "packages/ocamlfind/ocamlfind.1.8.1";
+        hash = "sha256:11avrzm0gdc6mz7dazr8q18ir5429ckc36s2mv0l8722znq8lc3k";
+        package = "packages/ocamlfind/ocamlfind.1.9.1";
       };
       pname = "ocamlfind";
       src = pkgs.fetchurl 
       {
-        sha256 = "00s3sfb02pnjmkax25pcnljcnhcggiliccfz69a72ic7gsjwz1cf";
-        url = "http://download.camlcity.org/download/findlib-1.8.1.tar.gz";
+        sha256 = "1qhgk25avmz4l4g47g8jvk0k1g9p9d5hbdrwpz2693a8ajyvhhib";
+        url = "http://download.camlcity.org/download/findlib-1.9.1.tar.gz";
       };
-      version = "1.8.1";
+      version = "1.9.1";
     };
     ocplib-endian = 
     {
@@ -520,9 +504,8 @@ in
       };
       version = "1.0.3";
     };
-    wayland-proxy-virtwl = 
+    wayland = 
     {
-      buildInputs = [ (pkgs.linux-headers or null) ];
       opamInputs = 
       {
         cmdliner = selection.cmdliner;
@@ -533,6 +516,30 @@ in
         lwt = selection.lwt;
         ocaml = selection.ocaml;
         xmlm = selection.xmlm;
+      };
+      opamSrc = repoPath (repos.opam-repository.src) 
+      {
+        hash = "sha256:1kpcv5dmivmqadcxszf1xbf4qra4m82rkf8zfwa5w13jxh3gvva8";
+        package = "packages/wayland/wayland.0.2";
+      };
+      pname = "wayland";
+      src = pkgs.fetchurl 
+      {
+        sha256 = "1325v495dir8s5hv4p1h82bfkhgw5cs8i98mkgjfjr4c5bj27csf";
+        url = "https://github.com/talex5/ocaml-wayland/releases/download/v0.2/wayland-v0.2.tbz";
+      };
+      version = "0.2";
+    };
+    wayland-proxy-virtwl = 
+    {
+      buildInputs = [ (pkgs.linux-headers or null) ];
+      opamInputs = 
+      {
+        cmdliner = selection.cmdliner;
+        dune = selection.dune;
+        logs = selection.logs;
+        ocaml = selection.ocaml;
+        wayland = selection.wayland;
       };
       opamSrc = "wayland-proxy-virtwl.opam";
       pname = "wayland-proxy-virtwl";

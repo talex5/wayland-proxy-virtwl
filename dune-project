@@ -2,10 +2,14 @@
 (name wayland-proxy-virtwl)
 (formatting disabled)
 (generate_opam_files true)
-(source (github talex5/virtwl-proxy))
+(source (github talex5/wayland-proxy-virtwl))
 (authors "talex5@gmail.com")
 (maintainers "talex5@gmail.com")
 (package
  (name wayland-proxy-virtwl)
  (synopsis "Proxy Wayland connections across the VM boundary")
- (depends (logs (>= 0.7.0)) (cmdliner (>= 1.0.4)) (ocaml (>= 4.08.0)) wayland))
+ (depends
+   (logs (>= 0.7.0))
+   (cmdliner (>= 1.0.4))
+   (ocaml (>= 4.08.0))
+   (wayland (>= 0.2))))
