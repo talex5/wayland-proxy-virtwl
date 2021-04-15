@@ -20,10 +20,10 @@ It is able to proxy Evince and Firefox at least.
 
 ## Installation
 
-Clone the repository (with submodules):
+Clone the repository:
 
 ```
-git clone --recursive https://github.com/talex5/wayland-proxy-virtwl.git
+git clone https://github.com/talex5/wayland-proxy-virtwl.git
 ```
 
 Then build with either opam (`opam install .`) or Nix (`nix-build .`).

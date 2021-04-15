@@ -8,4 +8,8 @@
 (package
  (name wayland-proxy-virtwl)
  (synopsis "Proxy Wayland connections across the VM boundary")
- (depends (logs (>= 0.7.0)) (cmdliner (>= 1.0.4)) (ocaml (>= 4.08.0)) wayland))
+ (depends
+   (logs (>= 0.7.0))
+   (cmdliner (>= 1.0.4))
+   (ocaml (>= 4.08.0))
+   (wayland (>= 0.2))))
