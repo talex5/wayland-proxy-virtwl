@@ -2,7 +2,7 @@
 (name wayland-proxy-virtwl)
 (formatting disabled)
 (generate_opam_files true)
-(source (github talex5/virtwl-proxy))
+(source (github talex5/wayland-proxy-virtwl))
 (authors "talex5@gmail.com")
 (maintainers "talex5@gmail.com")
 (package
