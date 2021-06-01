@@ -21,6 +21,7 @@ module H = struct
   include Wayland_protocols.Xdg_shell_client
   include Wayland_protocols.Xdg_output_unstable_v1_client
   include Wayland_protocols.Gtk_primary_selection_client
+  include Wayland_protocols.Wp_primary_selection_unstable_v1_client
   include Wayland_protocols.Server_decoration_client
 end
 
@@ -30,6 +31,7 @@ module C = struct
   include Wayland_protocols.Xdg_shell_server
   include Wayland_protocols.Xdg_output_unstable_v1_server
   include Wayland_protocols.Gtk_primary_selection_server
+  include Wayland_protocols.Wp_primary_selection_unstable_v1_server
   include Wayland_protocols.Server_decoration_server
 end
 
@@ -39,6 +41,7 @@ module Protocols = struct
   include Wayland_protocols.Xdg_shell_proto
   include Wayland_protocols.Xdg_output_unstable_v1_proto
   include Wayland_protocols.Gtk_primary_selection_proto
+  include Wayland_protocols.Wp_primary_selection_unstable_v1_proto
   include Wayland_protocols.Server_decoration_proto
 end
 
@@ -52,10 +55,11 @@ type t = {
    Host and client versions are assumed to match. *)
 module HD = struct
   type 'a t = 
-    | Surface        : 'v C.Wl_surface.t                   -> [`Wl_surface]                  t
-    | Data_offer     : 'v C.Wl_data_offer.t                -> [`Wl_data_offer]               t
-    | Gtk_data_offer : 'v C.Gtk_primary_selection_offer.t  -> [`Gtk_primary_selection_offer] t
-    | Output         : 'v C.Wl_output.t                    -> [`Wl_output]                   t
+    | Surface        : 'v C.Wl_surface.t                     -> [`Wl_surface]                     t
+    | Data_offer     : 'v C.Wl_data_offer.t                  -> [`Wl_data_offer]                  t
+    | Gtk_data_offer : 'v C.Gtk_primary_selection_offer.t    -> [`Gtk_primary_selection_offer]    t
+    | Zwp_data_offer : 'v C.Zwp_primary_selection_offer_v1.t -> [`Zwp_primary_selection_offer_v1] t
+    | Output         : 'v C.Wl_output.t                      -> [`Wl_output]                      t
 end
 
 (* Data attached to client objects (e.g. the corresponding host object).
@@ -74,16 +78,17 @@ module CD = struct
   }
 
   type 'a t = 
-    | Region           : 'v H.Wl_region.t                    -> [`Wl_region]                    t
-    | Surface          : 'v surface                          -> [`Wl_surface]                   t
-    | Buffer           : 'v buffer                           -> [`Wl_buffer]                    t
-    | Seat             : 'v H.Wl_seat.t                      -> [`Wl_seat]                      t
-    | Output           : 'v H.Wl_output.t                    -> [`Wl_output]                    t
-    | Toplevel         : 'v H.Xdg_toplevel.t                 -> [`Xdg_toplevel]                 t
-    | Xdg_surface      : 'v H.Xdg_surface.t                  -> [`Xdg_surface]                  t
-    | Xdg_positioner   : 'v H.Xdg_positioner.t               -> [`Xdg_positioner]               t
-    | Data_source      : 'v H.Wl_data_source.t               -> [`Wl_data_source]               t
-    | Gtk_source       : 'v H.Gtk_primary_selection_source.t -> [`Gtk_primary_selection_source] t
+    | Region           : 'v H.Wl_region.t                       -> [`Wl_region]                       t
+    | Surface          : 'v surface                             -> [`Wl_surface]                      t
+    | Buffer           : 'v buffer                              -> [`Wl_buffer]                       t
+    | Seat             : 'v H.Wl_seat.t                         -> [`Wl_seat]                         t
+    | Output           : 'v H.Wl_output.t                       -> [`Wl_output]                       t
+    | Toplevel         : 'v H.Xdg_toplevel.t                    -> [`Xdg_toplevel]                    t
+    | Xdg_surface      : 'v H.Xdg_surface.t                     -> [`Xdg_surface]                     t
+    | Xdg_positioner   : 'v H.Xdg_positioner.t                  -> [`Xdg_positioner]                  t
+    | Data_source      : 'v H.Wl_data_source.t                  -> [`Wl_data_source]                  t
+    | Gtk_source       : 'v H.Gtk_primary_selection_source.t    -> [`Gtk_primary_selection_source]    t
+    | Zwp_source       : 'v H.Zwp_primary_selection_source_v1.t -> [`Zwp_primary_selection_source_v1] t
 end
 
 (* Note: the role here is our role: [`Server] data is attached to proxies to
@@ -112,6 +117,7 @@ let to_client (type a) (h : (a, 'v, [`Client]) Proxy.t) : (a, 'v, [`Server]) Pro
   | Surface c -> cv c
   | Data_offer c -> cv c
   | Gtk_data_offer c -> cv c
+  | Zwp_data_offer c -> cv c
 
 let to_host (type a) (c : (a, 'v, [`Server]) Proxy.t) : (a, 'v, [`Client]) Proxy.t =
   let cv = Proxy.cast_version in
@@ -126,6 +132,7 @@ let to_host (type a) (c : (a, 'v, [`Server]) Proxy.t) : (a, 'v, [`Client]) Proxy
   | Xdg_positioner x -> cv x
   | Data_source x -> cv x
   | Gtk_source x -> cv x
+  | Zwp_source x -> cv x
   | Buffer x -> cv x.host_buffer
 
 (* When the client asks to destroy something, delay the ack until the host object is destroyed.
@@ -609,72 +616,144 @@ let make_data_device_manager ~virtwl bind proxy =
       make_data_device ~virtwl c ~host_device:(H.Wl_data_device_manager.get_data_device h ~seat)
   end
 
-let make_gtk_data_offer ~virtwl ~client_offer h =
-  let c = client_offer @@ object
-      inherit [_] C.Gtk_primary_selection_offer.v1
+module Gtk_primary = struct
+  let make_gtk_data_offer ~virtwl ~client_offer h =
+    let c = client_offer @@ object
+        inherit [_] C.Gtk_primary_selection_offer.v1
 
-      method on_destroy c =
-        delete_with H.Gtk_primary_selection_offer.destroy h c;
-        (* Effectively, the "selection" event is the destructor of the previous selection,
-           and this is the confirmation. The server doesn't send a delete event, so just do it manually. *)
-        Proxy.delete h
+        method on_destroy c =
+          delete_with H.Gtk_primary_selection_offer.destroy h c;
+          (* Effectively, the "selection" event is the destructor of the previous selection,
+             and this is the confirmation. The server doesn't send a delete event, so just do it manually. *)
+          Proxy.delete h
 
-      method on_receive _ ~mime_type ~fd =
-        Pipes.with_wrapped_writeable ~virtwl fd @@ fun fd ->
-        H.Gtk_primary_selection_offer.receive h ~mime_type ~fd
-    end in
-  let user_data = host_data (HD.Gtk_data_offer c) in
-  Proxy.Handler.attach h @@ object
-    inherit [_] H.Gtk_primary_selection_offer.v1
-    method! user_data = user_data
-    method on_offer _ = C.Gtk_primary_selection_offer.offer c
-  end
+        method on_receive _ ~mime_type ~fd =
+          Pipes.with_wrapped_writeable ~virtwl fd @@ fun fd ->
+          H.Gtk_primary_selection_offer.receive h ~mime_type ~fd
+      end in
+    let user_data = host_data (HD.Gtk_data_offer c) in
+    Proxy.Handler.attach h @@ object
+      inherit [_] H.Gtk_primary_selection_offer.v1
+      method! user_data = user_data
+      method on_offer _ = C.Gtk_primary_selection_offer.offer c
+    end
 
-let make_gtk_primary_selection_source ~host_source c =
-  let h =
-    host_source @@ object
-      inherit [_] H.Gtk_primary_selection_source.v1
-      method on_cancelled _ = C.Gtk_primary_selection_source.cancelled c
-      method on_send _ ~mime_type ~fd =
-        C.Gtk_primary_selection_source.send c ~mime_type ~fd;
-        Unix.close fd
-    end in
-  let user_data = client_data (Gtk_source h) in
-  Proxy.Handler.attach c @@ object
-    inherit [_] C.Gtk_primary_selection_source.v1
-    method! user_data = user_data
-    method on_destroy = delete_with H.Gtk_primary_selection_source.destroy h
-    method on_offer _ = H.Gtk_primary_selection_source.offer h
-  end
+  let make_gtk_primary_selection_source ~host_source c =
+    let h =
+      host_source @@ object
+        inherit [_] H.Gtk_primary_selection_source.v1
+        method on_cancelled _ = C.Gtk_primary_selection_source.cancelled c
+        method on_send _ ~mime_type ~fd =
+          C.Gtk_primary_selection_source.send c ~mime_type ~fd;
+          Unix.close fd
+      end in
+    let user_data = client_data (Gtk_source h) in
+    Proxy.Handler.attach c @@ object
+      inherit [_] C.Gtk_primary_selection_source.v1
+      method! user_data = user_data
+      method on_destroy = delete_with H.Gtk_primary_selection_source.destroy h
+      method on_offer _ = H.Gtk_primary_selection_source.offer h
+    end
 
-let make_gtk_primary_selection_device ~virtwl ~host_device c =
-  let h = host_device @@ object
-      inherit [_] H.Gtk_primary_selection_device.v1
-      method on_data_offer _ offer = make_gtk_data_offer ~virtwl ~client_offer:(C.Gtk_primary_selection_device.data_offer c) offer
-      method on_selection _ offer = C.Gtk_primary_selection_device.selection c (Option.map to_client offer)
-    end in
-  Proxy.Handler.attach c @@ object
-    inherit [_] C.Gtk_primary_selection_device.v1
-    method on_destroy = delete_with H.Gtk_primary_selection_device.destroy h
-    method on_set_selection _ ~source =
-      let source = Option.map to_host source in
-      H.Gtk_primary_selection_device.set_selection h ~source
-  end
+  let make_gtk_primary_selection_device ~virtwl ~host_device c =
+    let h = host_device @@ object
+        inherit [_] H.Gtk_primary_selection_device.v1
+        method on_data_offer _ offer = make_gtk_data_offer ~virtwl ~client_offer:(C.Gtk_primary_selection_device.data_offer c) offer
+        method on_selection _ offer = C.Gtk_primary_selection_device.selection c (Option.map to_client offer)
+      end in
+    Proxy.Handler.attach c @@ object
+      inherit [_] C.Gtk_primary_selection_device.v1
+      method on_destroy = delete_with H.Gtk_primary_selection_device.destroy h
+      method on_set_selection _ ~source =
+        let source = Option.map to_host source in
+        H.Gtk_primary_selection_device.set_selection h ~source
+    end
 
-let make_gtk_primary_selection_device_manager ~virtwl bind proxy =
-  let proxy = Proxy.cast_version proxy in
-  let h = bind @@ new H.Gtk_primary_selection_device_manager.v1 in
-  Proxy.Handler.attach proxy @@ object
-    inherit [_] C.Gtk_primary_selection_device_manager.v1
-    method on_create_source _ source =
-      let host_source = H.Gtk_primary_selection_device_manager.create_source h in
-      make_gtk_primary_selection_source ~host_source source
-    method on_destroy = delete_with H.Gtk_primary_selection_device_manager.destroy h
-    method on_get_device _ dev ~seat =
-      let seat = to_host seat in
-      let host_device = H.Gtk_primary_selection_device_manager.get_device h ~seat in
-      make_gtk_primary_selection_device ~virtwl ~host_device dev
-  end
+  let make_device_manager ~virtwl bind proxy =
+    let proxy = Proxy.cast_version proxy in
+    let h = bind @@ new H.Gtk_primary_selection_device_manager.v1 in
+    Proxy.Handler.attach proxy @@ object
+      inherit [_] C.Gtk_primary_selection_device_manager.v1
+      method on_create_source _ source =
+        let host_source = H.Gtk_primary_selection_device_manager.create_source h in
+        make_gtk_primary_selection_source ~host_source source
+      method on_destroy = delete_with H.Gtk_primary_selection_device_manager.destroy h
+      method on_get_device _ dev ~seat =
+        let seat = to_host seat in
+        let host_device = H.Gtk_primary_selection_device_manager.get_device h ~seat in
+        make_gtk_primary_selection_device ~virtwl ~host_device dev
+    end
+end
+
+(* This is basically the same as [Gtk_primary], but with things renamed a bit. *)
+module Zwp_primary = struct
+  let make_data_offer ~virtwl ~client_offer h =
+    let c = client_offer @@ object
+        inherit [_] C.Zwp_primary_selection_offer_v1.v1
+
+        method on_destroy c =
+          delete_with H.Zwp_primary_selection_offer_v1.destroy h c;
+          (* Effectively, the "selection" event is the destructor of the previous selection,
+             and this is the confirmation. The server doesn't send a delete event, so just do it manually. *)
+          Proxy.delete h
+
+        method on_receive _ ~mime_type ~fd =
+          Pipes.with_wrapped_writeable ~virtwl fd @@ fun fd ->
+          H.Zwp_primary_selection_offer_v1.receive h ~mime_type ~fd
+      end in
+    let user_data = host_data (HD.Zwp_data_offer c) in
+    Proxy.Handler.attach h @@ object
+      inherit [_] H.Zwp_primary_selection_offer_v1.v1
+      method! user_data = user_data
+      method on_offer _ = C.Zwp_primary_selection_offer_v1.offer c
+    end
+
+  let make_primary_selection_source ~host_source c =
+    let h =
+      host_source @@ object
+        inherit [_] H.Zwp_primary_selection_source_v1.v1
+        method on_cancelled _ = C.Zwp_primary_selection_source_v1.cancelled c
+        method on_send _ ~mime_type ~fd =
+          C.Zwp_primary_selection_source_v1.send c ~mime_type ~fd;
+          Unix.close fd
+      end in
+    let user_data = client_data (Zwp_source h) in
+    Proxy.Handler.attach c @@ object
+      inherit [_] C.Zwp_primary_selection_source_v1.v1
+      method! user_data = user_data
+      method on_destroy = delete_with H.Zwp_primary_selection_source_v1.destroy h
+      method on_offer _ = H.Zwp_primary_selection_source_v1.offer h
+    end
+
+  let make_primary_selection_device ~virtwl ~host_device c =
+    let h = host_device @@ object
+        inherit [_] H.Zwp_primary_selection_device_v1.v1
+        method on_data_offer _ offer = make_data_offer ~virtwl ~client_offer:(C.Zwp_primary_selection_device_v1.data_offer c) offer
+        method on_selection _ offer = C.Zwp_primary_selection_device_v1.selection c (Option.map to_client offer)
+      end in
+    Proxy.Handler.attach c @@ object
+      inherit [_] C.Zwp_primary_selection_device_v1.v1
+      method on_destroy = delete_with H.Zwp_primary_selection_device_v1.destroy h
+      method on_set_selection _ ~source =
+        let source = Option.map to_host source in
+        H.Zwp_primary_selection_device_v1.set_selection h ~source
+    end
+
+  let make_device_manager ~virtwl bind proxy =
+    let proxy = Proxy.cast_version proxy in
+    let h = bind @@ new H.Zwp_primary_selection_device_manager_v1.v1 in
+    Proxy.Handler.attach proxy @@ object
+      inherit [_] C.Zwp_primary_selection_device_manager_v1.v1
+      method on_create_source _ source =
+        let host_source = H.Zwp_primary_selection_device_manager_v1.create_source h in
+        make_primary_selection_source ~host_source source
+      method on_destroy = delete_with H.Zwp_primary_selection_device_manager_v1.destroy h
+      method on_get_device _ dev ~seat =
+        let seat = to_host seat in
+        let host_device = H.Zwp_primary_selection_device_manager_v1.get_device h ~seat in
+        make_primary_selection_device ~virtwl ~host_device dev
+    end
+end
 
 type entry = Entry : int32 * (module Metadata.S) -> entry
 
@@ -693,6 +772,7 @@ let registry =
     (module Wl_data_device_manager);
     (module Zxdg_output_manager_v1);
     (module Gtk_primary_selection_device_manager);
+    (module Zwp_primary_selection_device_manager_v1);
     (module Wl_seat); (* Must come after gtk, or evince crashes *)
     (module Org_kde_kwin_server_decoration_manager);
   ]
@@ -737,7 +817,8 @@ let make_registry t reg =
       | Wl_seat.T -> make_seat bind proxy
       | Wl_output.T -> make_output bind proxy
       | Wl_data_device_manager.T -> make_data_device_manager ~virtwl:t.virtwl bind proxy
-      | Gtk_primary_selection_device_manager.T -> make_gtk_primary_selection_device_manager ~virtwl:t.virtwl bind proxy
+      | Gtk_primary_selection_device_manager.T -> Gtk_primary.make_device_manager ~virtwl:t.virtwl bind proxy
+      | Zwp_primary_selection_device_manager_v1.T -> Zwp_primary.make_device_manager ~virtwl:t.virtwl bind proxy
       | Xdg_wm_base.T -> make_xdg_wm_base ~tag:t.config.tag bind proxy
       | Zxdg_output_manager_v1.T -> make_zxdg_output_manager_v1 bind proxy
       | Org_kde_kwin_server_decoration_manager.T -> make_kde_decoration_manager bind proxy
