@@ -57,7 +57,7 @@ module HD = struct
   type 'a t = 
     | Surface        : 'v C.Wl_surface.t                     -> [`Wl_surface]                     t
     | Data_offer     : 'v C.Wl_data_offer.t                  -> [`Wl_data_offer]                  t
-    | Gtk_data_offer : 'v C.Gtk_primary_selection_offer.t    -> [`Gtk_primary_selection_offer]    t
+    | Gtk_data_offer : 'v C.Gtk_primary_selection_offer.t    -> [`Zwp_primary_selection_offer_v1] t
     | Zwp_data_offer : 'v C.Zwp_primary_selection_offer_v1.t -> [`Zwp_primary_selection_offer_v1] t
     | Output         : 'v C.Wl_output.t                      -> [`Wl_output]                      t
 end
@@ -87,7 +87,7 @@ module CD = struct
     | Xdg_surface      : 'v H.Xdg_surface.t                     -> [`Xdg_surface]                     t
     | Xdg_positioner   : 'v H.Xdg_positioner.t                  -> [`Xdg_positioner]                  t
     | Data_source      : 'v H.Wl_data_source.t                  -> [`Wl_data_source]                  t
-    | Gtk_source       : 'v H.Gtk_primary_selection_source.t    -> [`Gtk_primary_selection_source]    t
+    | Gtk_source       : 'v H.Zwp_primary_selection_source_v1.t -> [`Gtk_primary_selection_source]    t
     | Zwp_source       : 'v H.Zwp_primary_selection_source_v1.t -> [`Zwp_primary_selection_source_v1] t
 end
 
@@ -116,8 +116,10 @@ let to_client (type a) (h : (a, 'v, [`Client]) Proxy.t) : (a, 'v, [`Server]) Pro
   | Output c -> cv c
   | Surface c -> cv c
   | Data_offer c -> cv c
-  | Gtk_data_offer c -> cv c
   | Zwp_data_offer c -> cv c
+  | Gtk_data_offer _ ->
+    (* Here, a client Gtk corresponds to a host Zwp, so the types aren't right. *)
+    failwith "Can't use to_client with GTK translation"
 
 let to_host (type a) (c : (a, 'v, [`Server]) Proxy.t) : (a, 'v, [`Client]) Proxy.t =
   let cv = Proxy.cast_version in
@@ -131,9 +133,11 @@ let to_host (type a) (c : (a, 'v, [`Server]) Proxy.t) : (a, 'v, [`Client]) Proxy
   | Xdg_surface x -> cv x
   | Xdg_positioner x -> cv x
   | Data_source x -> cv x
-  | Gtk_source x -> cv x
   | Zwp_source x -> cv x
   | Buffer x -> cv x.host_buffer
+  | Gtk_source _ ->
+    (* Here, a client Gtk corresponds to a host Zwp, so the types aren't right. *)
+    failwith "Can't use to_host with GTK translation"
 
 (* When the client asks to destroy something, delay the ack until the host object is destroyed.
    This means the client sees events in the usual order, and means we can continue forwarding
@@ -622,18 +626,18 @@ module Gtk_primary = struct
         inherit [_] C.Gtk_primary_selection_offer.v1
 
         method on_destroy c =
-          delete_with H.Gtk_primary_selection_offer.destroy h c;
+          delete_with H.Zwp_primary_selection_offer_v1.destroy h c;
           (* Effectively, the "selection" event is the destructor of the previous selection,
              and this is the confirmation. The server doesn't send a delete event, so just do it manually. *)
           Proxy.delete h
 
         method on_receive _ ~mime_type ~fd =
           Pipes.with_wrapped_writeable ~virtwl fd @@ fun fd ->
-          H.Gtk_primary_selection_offer.receive h ~mime_type ~fd
+          H.Zwp_primary_selection_offer_v1.receive h ~mime_type ~fd
       end in
     let user_data = host_data (HD.Gtk_data_offer c) in
     Proxy.Handler.attach h @@ object
-      inherit [_] H.Gtk_primary_selection_offer.v1
+      inherit [_] H.Zwp_primary_selection_offer_v1.v1
       method! user_data = user_data
       method on_offer _ = C.Gtk_primary_selection_offer.offer c
     end
@@ -641,7 +645,7 @@ module Gtk_primary = struct
   let make_gtk_primary_selection_source ~host_source c =
     let h =
       host_source @@ object
-        inherit [_] H.Gtk_primary_selection_source.v1
+        inherit [_] H.Zwp_primary_selection_source_v1.v1
         method on_cancelled _ = C.Gtk_primary_selection_source.cancelled c
         method on_send _ ~mime_type ~fd =
           C.Gtk_primary_selection_source.send c ~mime_type ~fd;
@@ -651,36 +655,47 @@ module Gtk_primary = struct
     Proxy.Handler.attach c @@ object
       inherit [_] C.Gtk_primary_selection_source.v1
       method! user_data = user_data
-      method on_destroy = delete_with H.Gtk_primary_selection_source.destroy h
-      method on_offer _ = H.Gtk_primary_selection_source.offer h
+      method on_destroy = delete_with H.Zwp_primary_selection_source_v1.destroy h
+      method on_offer _ = H.Zwp_primary_selection_source_v1.offer h
     end
 
   let make_gtk_primary_selection_device ~virtwl ~host_device c =
     let h = host_device @@ object
-        inherit [_] H.Gtk_primary_selection_device.v1
+        inherit [_] H.Zwp_primary_selection_device_v1.v1
         method on_data_offer _ offer = make_gtk_data_offer ~virtwl ~client_offer:(C.Gtk_primary_selection_device.data_offer c) offer
-        method on_selection _ offer = C.Gtk_primary_selection_device.selection c (Option.map to_client offer)
+        method on_selection _ offer =
+          let to_client x =
+            let Host_data data = user_data x in
+            match data with
+            | HD.Gtk_data_offer c -> cv c
+            | HD.Zwp_data_offer _ -> failwith "Can't mix Zwp and Gtk selection protocols!"
+          in
+          C.Gtk_primary_selection_device.selection c (Option.map to_client offer)
       end in
     Proxy.Handler.attach c @@ object
       inherit [_] C.Gtk_primary_selection_device.v1
-      method on_destroy = delete_with H.Gtk_primary_selection_device.destroy h
+      method on_destroy = delete_with H.Zwp_primary_selection_device_v1.destroy h
       method on_set_selection _ ~source =
+        let to_host x =
+          let Client_data (CD.Gtk_source data) = user_data x in
+          cv data
+        in
         let source = Option.map to_host source in
-        H.Gtk_primary_selection_device.set_selection h ~source
+        H.Zwp_primary_selection_device_v1.set_selection h ~source
     end
 
   let make_device_manager ~virtwl bind proxy =
     let proxy = Proxy.cast_version proxy in
-    let h = bind @@ new H.Gtk_primary_selection_device_manager.v1 in
+    let h = bind @@ new H.Zwp_primary_selection_device_manager_v1.v1 in
     Proxy.Handler.attach proxy @@ object
       inherit [_] C.Gtk_primary_selection_device_manager.v1
       method on_create_source _ source =
-        let host_source = H.Gtk_primary_selection_device_manager.create_source h in
+        let host_source = H.Zwp_primary_selection_device_manager_v1.create_source h in
         make_gtk_primary_selection_source ~host_source source
-      method on_destroy = delete_with H.Gtk_primary_selection_device_manager.destroy h
+      method on_destroy = delete_with H.Zwp_primary_selection_device_manager_v1.destroy h
       method on_get_device _ dev ~seat =
         let seat = to_host seat in
-        let host_device = H.Gtk_primary_selection_device_manager.get_device h ~seat in
+        let host_device = H.Zwp_primary_selection_device_manager_v1.get_device h ~seat in
         make_gtk_primary_selection_device ~virtwl ~host_device dev
     end
 end
@@ -771,7 +786,6 @@ let registry =
     (module Wl_output);
     (module Wl_data_device_manager);
     (module Zxdg_output_manager_v1);
-    (module Gtk_primary_selection_device_manager);
     (module Zwp_primary_selection_device_manager_v1);
     (module Wl_seat); (* Must come after gtk, or evince crashes *)
     (module Org_kde_kwin_server_decoration_manager);
@@ -779,14 +793,20 @@ let registry =
 
 let make_registry t reg =
   let registry =
-    registry |> List.filter_map (fun (module M : Metadata.S) ->
+    registry |> List.concat_map (fun (module M : Metadata.S) ->
         match Registry.get t.host_registry M.interface with
         | [] ->
           Log.info (fun f -> f "Host doesn't support service %s, so skipping" M.interface);
-          None
+          []
         | { Registry.name; version = host_version } :: _ ->
           let max_version = min M.version host_version in
-          Some (name, Entry (max_version, (module M)))
+          let item = (name, Entry (max_version, (module M))) in
+          if M.interface = Protocols.Zwp_primary_selection_device_manager_v1.interface then (
+            let compat = (name, Entry (max_version, (module Protocols.Gtk_primary_selection_device_manager))) in
+            [item; compat]
+          ) else (
+            [item]
+          )
       )
     |> Array.of_list
   in
