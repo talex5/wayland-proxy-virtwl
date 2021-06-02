@@ -11,5 +11,5 @@
  (depends
    (logs (>= 0.7.0))
    (cmdliner (>= 1.0.4))
-   (ocaml (>= 4.08.0))
+   (ocaml (>= 4.10.0))
    (wayland (>= 0.2))))
