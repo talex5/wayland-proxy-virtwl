@@ -185,7 +185,7 @@ let make_surface ~host_surface c =
         H.Wl_surface.attach h ~buffer:None ~x ~y
     method on_commit _ =
       (* todo: only copy the bit that changed *)
-      Cstruct.blit data.client_memory 0 data.host_memory 0 (Cstruct.len data.client_memory);
+      Cstruct.blit data.client_memory 0 data.host_memory 0 (Cstruct.length data.client_memory);
       H.Wl_surface.commit h
     method on_damage _ ~x ~y ~width ~height = H.Wl_surface.damage h ~x ~y ~width ~height
     method on_damage_buffer _ ~x ~y ~width ~height = H.Wl_surface.damage_buffer h ~x ~y ~width ~height

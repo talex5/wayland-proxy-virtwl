@@ -11,5 +11,6 @@
  (depends
    (logs (>= 0.7.0))
    (cmdliner (>= 1.0.4))
+   (cstruct (>= 6.0.0))
    (ocaml (>= 4.10.0))
    (wayland (>= 0.2))))
