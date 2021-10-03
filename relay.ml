@@ -80,7 +80,7 @@ module CD = struct
   type 'a t = 
     | Region           : 'v H.Wl_region.t                       -> [`Wl_region]                       t
     | Surface          : 'v surface                             -> [`Wl_surface]                      t
-    | Buffer           : 'v buffer                              -> [`Wl_buffer]                       t
+    | Buffer           : 'v buffer Lazy.t                       -> [`Wl_buffer]                       t
     | Seat             : 'v H.Wl_seat.t                         -> [`Wl_seat]                         t
     | Output           : 'v H.Wl_output.t                       -> [`Wl_output]                       t
     | Toplevel         : 'v H.Xdg_toplevel.t                    -> [`Xdg_toplevel]                    t
@@ -134,7 +134,7 @@ let to_host (type a) (c : (a, 'v, [`Server]) Proxy.t) : (a, 'v, [`Client]) Proxy
   | Xdg_positioner x -> cv x
   | Data_source x -> cv x
   | Zwp_source x -> cv x
-  | Buffer x -> cv x.host_buffer
+  | Buffer x -> cv (Lazy.force x).host_buffer
   | Gtk_source _ ->
     (* Here, a client Gtk corresponds to a host Zwp, so the types aren't right. *)
     failwith "Can't use to_host with GTK translation"
@@ -157,6 +157,175 @@ let make_region ~host_region r =
     method on_destroy = delete_with H.Wl_region.destroy h
   end
 
+(* wl_shm memory buffers are allocated by the client inside the guest and
+   cannot be shared directly with the host. Instead, we allocate some host
+   memory of the same size, map that into the guest, and copy the data across
+   as needed.
+
+   Xwayland likes to create huge numbers of mappings and then destroy them
+   without ever using the buffers for anything, so to avoid the expense of
+   mapping and unmapping pools that are never used, we map them lazily.
+
+   We assume that when a pool is resized the client will recreate all the
+   buffers, which might not always be true, but seems to be working so far. *)
+module Shm : sig
+  type t
+  (** A proxy for a pair of memory pools. *)
+
+  type buffer
+  (** A region within the pools. *)
+
+  val create :
+    host_shm:[`V1] H.Wl_shm.t ->
+    virtwl:Unix.file_descr ->
+    client_fd:Unix.file_descr ->
+    size:int32 ->
+    [`V1] C.Wl_shm_pool.t ->
+    t
+  (** [create ~host_shm ~virtwl ~client_fd ~size proxy] is a pool proxy that creates a host pool of size [size],
+      and maps that and [client_fd] into our address space.
+      @param virtwl Used to create a memory region that can be shared with the host.
+      @param host_shm Used to notify the host compositor about the new region.
+      @param client_fd Used to map the client's memory. Will be closed when the ref-count reaches zero.
+      @param proxy [client_fd] is closed when this and all buffers have been destroyed. *)
+
+  val resize : t -> int32 -> unit
+
+  val create_buffer : t ->
+    offset:int32 ->
+    width:int32 ->
+    height:int32 ->
+    stride:int32 ->
+    format:Protocols.Wl_shm.Format.t ->
+    [`V1] C.Wl_buffer.t ->
+    buffer
+  (** [create_buffer t ... proxy] allocates a region of [t].
+      @param proxy Will receive [release] events from the compositor if attached. *)
+
+  val destroy_buffer : buffer -> unit
+  (** [destroy_buffer b] destroys the host buffer (if any), and notifies the client proxy of the deletion. *)
+
+  val user_data : buffer -> [`V1] CD.buffer Lazy.t
+  (** [user_data b] is some data to attach to the client proxy so the surface can find it. *)
+
+  val map_buffer : 'v CD.buffer Lazy.t -> 'v CD.buffer
+  (** [map_buffer user_data] is used by the surface when attaching the buffer. *)
+end = struct
+  type mapping = {
+    host_pool : [`V1] H.Wl_shm_pool.t;
+    client_memory_pool : Lwt_bytes.t;   (* The client's memory mapped into our address space *)
+    host_memory_pool : Lwt_bytes.t;     (* The host's memory mapped into our address space *)
+  }
+
+  type t = {
+    host_shm : [`V1 ] H.Wl_shm.t;
+    virtwl : Wayland_virtwl.t;
+    mutable size : int32;
+    mutable client_fd : Unix.file_descr option; (* [client_fd = None <=> ref_count = 0 *)
+    mutable ref_count : int;                    (* The number of client proxies (pool + buffers) active *)
+    mutable mapping : mapping option;           (* If [None] then map when needed *)
+  }
+
+  (* This is called when we attach a buffer to a surface
+     (so the client-side buffer proxy must still exist). *)
+  let get_mapping t =
+    assert (t.ref_count > 0);
+    match t.mapping with
+    | Some m -> m
+    | None ->
+      let client_fd = Option.get t.client_fd in (* OK because ref_count > 0 *)
+      let size = Int32.to_int t.size in
+      let client_memory_pool = Unix.map_file client_fd Bigarray.Char Bigarray.c_layout true [| size |] in
+      let host_pool, host_memory_pool =
+        Wayland_virtwl.with_memory_fd t.virtwl ~size (fun fd ->
+            let host_pool = H.Wl_shm.create_pool t.host_shm ~fd ~size:t.size @@ new H.Wl_shm_pool.v1 in
+            let host_memory = Wayland_virtwl.map_file fd Bigarray.Char ~n_elements:size in
+            host_pool, host_memory
+          )
+      in
+      let host_memory_pool = Bigarray.array1_of_genarray host_memory_pool in
+      let client_memory_pool = Bigarray.array1_of_genarray client_memory_pool in
+      let m = { host_pool; client_memory_pool; host_memory_pool } in
+      t.mapping <- Some m;
+      m
+
+  type buffer = {
+    data : [`V1] CD.buffer Lazy.t;      (* Forced when buffer is attached to a surface *)
+    on_destroy : unit Lazy.t;           (* Forced when client buffer proxy is destroyed *)
+  }
+
+  let user_data b = b.data
+
+  let dec_ref t =
+    assert (t.ref_count > 0);
+    t.ref_count <- t.ref_count - 1;
+    if t.ref_count = 0 then (
+      Unix.close (Option.get t.client_fd);
+      t.client_fd <- None
+    )
+
+  let clear_mapping t =
+    t.mapping |> Option.iter (fun m ->
+        H.Wl_shm_pool.destroy m.host_pool;
+        t.mapping <- None
+      )
+
+  let resize t new_size =
+    if t.size <> new_size then (
+      t.size <- new_size;
+      clear_mapping t           (* Will force a new mapping if used in future *)
+    )
+
+  let create_buffer t ~offset ~width ~height ~stride ~format buffer : buffer =
+    assert (t.ref_count > 0);   (* The shm_pool proxy must exist to call this. *)
+    t.ref_count <- t.ref_count + 1;
+    Proxy.on_delete buffer (fun () -> dec_ref t);
+    let data =
+      lazy (
+        (* Forced by [map_buffer] when the the buffer is attached to a surface,
+           so buffer proxy still exists. *)
+        let len = Int32.to_int height * Int32.to_int stride in
+        let mapping = get_mapping t in
+        let host_memory = Cstruct.of_bigarray mapping.host_memory_pool ~off:(Int32.to_int offset) ~len in
+        let client_memory = Cstruct.of_bigarray mapping.client_memory_pool ~off:(Int32.to_int offset) ~len in
+        let host_buffer =
+          H.Wl_shm_pool.create_buffer mapping.host_pool ~offset ~width ~height ~stride ~format
+          @@ object
+            inherit [_] H.Wl_buffer.v1
+            method on_release _ = C.Wl_buffer.release buffer
+          end 
+        in
+        { CD.host_memory; client_memory; host_buffer }
+      )
+    in
+    let on_destroy = lazy (
+      if Lazy.is_val data then (
+        delete_with H.Wl_buffer.destroy (Lazy.force data).host_buffer buffer
+      ) else (
+        Proxy.delete buffer
+      )
+    ) in
+    { on_destroy; data }
+
+  (* Client-side buffer proxy must still exist when this is called. *)
+  let map_buffer : _ -> _ CD.buffer = Lazy.force
+
+  let destroy_buffer b =
+    Lazy.force b.on_destroy
+
+  let create ~host_shm ~virtwl ~client_fd ~size client_shm =
+    let t = {
+      host_shm;
+      virtwl;
+      size;
+      client_fd = Some client_fd;
+      ref_count = 1;
+      mapping = None;
+    } in
+    Proxy.on_delete client_shm (fun () -> dec_ref t);
+    t
+end
+
 let make_surface ~host_surface c =
   let h =
     let user_data = host_data (HD.Surface c) in
@@ -172,10 +341,12 @@ let make_surface ~host_surface c =
   Proxy.Handler.attach c @@ object
     inherit [_] C.Wl_surface.v1
     method! user_data = client_data (Surface data)
+
     method on_attach _ ~buffer ~x ~y =
       match buffer with
       | Some buffer ->
         let Client_data (Buffer buffer) = user_data buffer in
+        let buffer = Shm.map_buffer buffer in
         data.host_memory <- buffer.host_memory;
         data.client_memory <- buffer.client_memory;
         H.Wl_surface.attach h ~buffer:(Some buffer.host_buffer) ~x ~y
@@ -183,6 +354,7 @@ let make_surface ~host_surface c =
         data.host_memory <- Cstruct.empty;
         data.client_memory <- Cstruct.empty;
         H.Wl_surface.attach h ~buffer:None ~x ~y
+
     method on_commit _ =
       (* todo: only copy the bit that changed *)
       Cstruct.blit data.client_memory 0 data.host_memory 0 (Cstruct.length data.client_memory);
@@ -235,60 +407,28 @@ let make_subcompositor bind proxy =
       make_subsurface ~host_subsurface subsurface
   end
 
-let make_buffer ~host_buffer ~host_memory ~client_memory proxy =
-  let user_data = client_data (Buffer {host_buffer; host_memory; client_memory}) in
+let make_buffer b proxy =
+  let user_data = client_data (Buffer (Shm.user_data b)) in
   Proxy.Handler.attach proxy @@ object
     inherit [_] C.Wl_buffer.v1
     method! user_data = user_data
-    method on_destroy = delete_with H.Wl_buffer.destroy host_buffer
+    method on_destroy _ = Shm.destroy_buffer b
   end
-
-type mapping = {
-  host_pool : [`V1] H.Wl_shm_pool.t;
-  client_memory_pool : Lwt_bytes.t;
-  host_memory_pool : Lwt_bytes.t;
-}
 
 (* todo: this all needs to be more robust.
    Also, sealing? *)
 let make_shm_pool ~virtwl ~host_shm proxy ~fd:client_fd ~size:orig_size =
-  let alloc ~size =
-    let client_memory_pool = Unix.map_file client_fd Bigarray.Char Bigarray.c_layout true [| Int32.to_int size |] in
-    let host_pool, host_memory_pool =
-      Wayland_virtwl.with_memory_fd virtwl ~size:(Int32.to_int size) (fun fd ->
-          let host_pool = H.Wl_shm.create_pool host_shm ~fd ~size @@ new H.Wl_shm_pool.v1 in
-          let host_memory = Wayland_virtwl.map_file fd Bigarray.Char ~n_elements:(Int32.to_int size) in
-          host_pool, host_memory
-        )
-    in
-    let host_memory_pool = Bigarray.array1_of_genarray host_memory_pool in
-    let client_memory_pool = Bigarray.array1_of_genarray client_memory_pool in
-    { host_pool; client_memory_pool; host_memory_pool }
-  in
-  let mapping = ref (alloc ~size:orig_size) in
+  let mapping = Shm.create ~host_shm ~virtwl ~client_fd ~size:orig_size proxy in
   Proxy.Handler.attach proxy @@ object
     inherit [_] C.Wl_shm_pool.v1
 
     method on_create_buffer _ buffer ~offset ~width ~height ~stride ~format =
-      let len = Int32.to_int height * Int32.to_int stride in
-      let host_memory = Cstruct.of_bigarray (!mapping).host_memory_pool ~off:(Int32.to_int offset) ~len in
-      let client_memory = Cstruct.of_bigarray (!mapping).client_memory_pool ~off:(Int32.to_int offset) ~len in
-      let host_buffer =
-        H.Wl_shm_pool.create_buffer (!mapping).host_pool ~offset ~width ~height ~stride ~format
-        @@ object
-          inherit [_] H.Wl_buffer.v1
-          method on_release _ = C.Wl_buffer.release buffer
-        end 
-      in
-      make_buffer ~host_buffer ~host_memory ~client_memory buffer
+      let b = Shm.create_buffer mapping ~offset ~width ~height ~stride ~format buffer in
+      make_buffer b buffer
 
-    method on_destroy t =
-      Unix.close client_fd;
-      delete_with H.Wl_shm_pool.destroy (!mapping).host_pool t
+    method on_destroy t = Proxy.delete t
 
-    method on_resize _ ~size =
-      H.Wl_shm_pool.destroy (!mapping).host_pool;
-      mapping := alloc ~size
+    method on_resize _ ~size = Shm.resize mapping size
   end
 
 let make_output bind c =
