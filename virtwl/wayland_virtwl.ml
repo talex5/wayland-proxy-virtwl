@@ -26,6 +26,8 @@ let of_context_fd fd : #Wayland.S.transport =
     (* The ioctl interface doesn't seem to have shutdown. *)
     method close =
       Lwt_unix.close fd
+
+  method pp f = Fmt.string f "virtwl"
   end
 
 let of_fd fd = fd

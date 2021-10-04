@@ -21,7 +21,36 @@ let is_listening path =
     Log.warn (fun f -> f "Error testing socket %S: %a" path Fmt.exn ex);
     false
 
-let main tag wayland_display args =
+
+let setup_logging ~verbose ~log_suppress =
+  let log_level = if verbose then Logs.Info else Logs.Warning in
+  Logs.(set_level (Some log_level));
+  let wayland_env, wayland =
+    match Sys.getenv_opt "WAYLAND_DEBUG_PROXY" with
+    | Some x -> "WAYLAND_DEBUG_PROXY", x
+    | None -> "WAYLAND_DEBUG", (Sys.getenv_opt "WAYLAND_DEBUG" |> Option.value ~default:"")
+  in
+  let wayland =
+    if wayland = "1" then ["client"; "server"]
+    else String.split_on_char ',' wayland
+  in
+  wayland |> List.iter (function
+      | "client" -> Logs.Src.set_level Trace.Client.src (Some Logs.Info)
+      | "server" -> Logs.Src.set_level Trace.Host.src (Some Logs.Info)
+      | "" -> ()
+      | x -> Log.warn (fun f -> f "Unknown $%s item %S" wayland_env x)
+    );
+  log_suppress |> List.iter (function
+      | `Motion -> Trace.motion := false
+      | `Shm -> Trace.shm := false
+      | `Delete -> Trace.delete := false
+      | `Region -> Trace.region := false
+      | `Drawing -> Trace.drawing := false
+      | `Hints -> Trace.hints := false
+    )
+
+let main tag verbose log_suppress wayland_display args =
+  setup_logging ~verbose ~log_suppress;
   let config = { Config.tag } in
   let socket_path = Wayland.Unix_transport.socket_path ~wayland_display () in
   let existing_socket = Sys.file_exists socket_path in
@@ -55,6 +84,29 @@ let tag =
     ~doc:"Tag to prefix to window titles"
     ["tag"]
 
+let verbose =
+  Arg.value @@
+  Arg.flag @@
+  Arg.info
+    ~doc:"Verbose logging"
+    ["v"; "verbose"]
+
+let suppress = Arg.enum [
+    "motion", `Motion;
+    "shm", `Shm;
+    "delete", `Delete;
+    "region", `Region;
+    "drawing", `Drawing;
+    "hints", `Hints;
+  ]
+
+let log_suppress =
+  Arg.value @@
+  Arg.(opt (list suppress)) [] @@
+  Arg.info
+    ~doc:"Suppress some log messages"
+    ["log-suppress"]
+
 let wayland_display =
   Arg.value @@
   Arg.(opt string) "wayland-1" @@
@@ -69,7 +121,7 @@ let args =
     ~doc:"Sub-command to execute"
     []
 
-let virtwl_proxy = Term.(ret (const main $ tag $ wayland_display $ args))
+let virtwl_proxy = Term.(ret (const main $ tag $ verbose $ log_suppress $ wayland_display $ args))
 
 let term_exit (x : unit Term.result) = Term.exit x
 
