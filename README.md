@@ -42,6 +42,31 @@ ExecStart=/path/to/wayland-proxy-virtwl --tag="[my-vm] " --wayland-display wayla
 WantedBy=default.target
 ```
 
+## Logging
+
+There are several ways to enable logging:
+
+- Running with `--verbose` will turn on all info-level logging.
+- Setting e.g. `WAYLAND_DEBUG_PROXY=client,server` will turn on info-level debugging for the listed components.
+- If `WAYLAND_DEBUG_PROXY` isn't set, `WAYLAND_DEBUG` is used instead. Setting this will also affect child processes.
+
+The available log sources are:
+
+- `client` -- log Wayland messages between the relay and the client applications.
+- `server` -- log Wayland messages between the relay and the host compositor.
+
+You can also suppress certain classes of log messages using e.g. `--log-suppress motion,shm,delete,region,drawing,hints`.
+The classes are:
+
+- `motion` -- pointer motion/frame events
+- `shm` -- managing shared memory pools
+- `delete` -- confirmation of object deletion
+- `region` -- setting up input regions
+- `drawing` -- attaching buffers, marking damage
+- `hints` -- window manager hints
+
+See [trace.ml](./trace.ml) for details.
+
 ## Using virtwl directly
 
 `tests/test.ml` is a simple test application that uses the virtwl kernel interface directly
