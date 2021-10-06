@@ -256,14 +256,6 @@ end = struct
 
   let user_data b = b.data
 
-  let dec_ref t =
-    assert (t.ref_count > 0);
-    t.ref_count <- t.ref_count - 1;
-    if t.ref_count = 0 then (
-      Unix.close (Option.get t.client_fd);
-      t.client_fd <- None
-    )
-
   let clear_mapping t =
     t.mapping |> Option.iter (fun m ->
         H.Wl_shm_pool.destroy m.host_pool;
@@ -274,6 +266,15 @@ end = struct
     if t.size <> new_size then (
       t.size <- new_size;
       clear_mapping t           (* Will force a new mapping if used in future *)
+    )
+
+  let dec_ref t =
+    assert (t.ref_count > 0);
+    t.ref_count <- t.ref_count - 1;
+    if t.ref_count = 0 then (
+      Unix.close (Option.get t.client_fd);
+      t.client_fd <- None;
+      clear_mapping t
     )
 
   let create_buffer t ~offset ~width ~height ~stride ~format buffer : buffer =
