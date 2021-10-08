@@ -95,11 +95,12 @@ let reporter =
     let src = Logs.Src.name src in
     msgf @@ fun ?header ?tags:_ fmt ->
     Fmt.kstrf (fun line ->
-        print_endline line;
+        output_string stderr line;
+        flush stderr;
         over ();
         k ()
       )
-      ("%11s %a: @[" ^^ fmt ^^ "@]")
+      ("%11s %a: @[" ^^ fmt ^^ "@]@.")
       src
       Logs_fmt.pp_header (level, header)
   in
