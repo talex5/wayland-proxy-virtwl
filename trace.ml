@@ -90,17 +90,30 @@ module Client = struct
       )
 end
 
+let pp_status f = function
+  | Unix.WEXITED x -> Fmt.pf f "exited with status %d" x
+  | Unix.WSIGNALED x -> Fmt.pf f "killed by signal %d" x
+  | Unix.WSTOPPED x -> Fmt.pf f "stopped by signal %d" x
+
 let reporter =
   let report src level ~over k msgf =
     let src = Logs.Src.name src in
     msgf @@ fun ?header ?tags:_ fmt ->
-    Fmt.kstrf (fun line ->
-        print_endline line;
+    Fmt.kstr (fun line ->
+        output_string stderr line;
+        flush stderr;
         over ();
         k ()
       )
-      ("%11s %a: @[" ^^ fmt ^^ "@]")
+      ("%11s %a: @[" ^^ fmt ^^ "@]@.")
       src
       Logs_fmt.pp_header (level, header)
   in
   { Logs.report = report }
+
+let handle_async_error ex =
+  let bt = Printexc.get_raw_backtrace () in
+  Log.err (fun f -> f "Uncaught async exception: %a" Fmt.exn_backtrace (ex, bt))
+
+let () =
+  Lwt.async_exception_hook := handle_async_error

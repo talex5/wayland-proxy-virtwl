@@ -12,5 +12,8 @@
    (logs (>= 0.7.0))
    (cmdliner (>= 1.0.4))
    (cstruct (>= 6.0.0))
+   (cstruct-lwt (>= 6.0.0))
+   (ppx_cstruct (>= 6.0.0))
    (ocaml (>= 4.10.0))
+   (fmt (>= 0.8.9))
    (wayland (>= 0.2))))

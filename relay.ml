@@ -15,41 +15,35 @@ open Wayland
    So we just cast away version contraints using [cv]. *)
 let cv = Proxy.cast_version
 
-(* Modules we use to interact with the host (to which we are a client). *)
-module H = struct
-  include Wayland.Wayland_client
-  include Wayland_protocols.Xdg_shell_client
-  include Wayland_protocols.Xdg_output_unstable_v1_client
-  include Wayland_protocols.Gtk_primary_selection_client
-  include Wayland_protocols.Wp_primary_selection_unstable_v1_client
-  include Wayland_protocols.Server_decoration_client
-end
+type xwayland_hooks = <
+  on_create_surface :
+    'v. ([< `V1 | `V2 | `V3 | `V4 ] as 'v) H.Wl_surface.t -> 'v C.Wl_surface.t ->
+    set_configured:([`Show | `Hide] -> unit) ->
+    unit;
 
-(* Modules we use to interact with clients (to which we are a server). *)
-module C = struct
-  include Wayland.Wayland_server
-  include Wayland_protocols.Xdg_shell_server
-  include Wayland_protocols.Xdg_output_unstable_v1_server
-  include Wayland_protocols.Gtk_primary_selection_server
-  include Wayland_protocols.Wp_primary_selection_unstable_v1_server
-  include Wayland_protocols.Server_decoration_server
-end
+  on_destroy_surface :
+    'v. ([< `V1 | `V2 | `V3 | `V4 ] as 'v) H.Wl_surface.t ->
+    unit;
 
-(* Metadata for the protocols we use. *)
-module Protocols = struct
-  include Wayland_proto
-  include Wayland_protocols.Xdg_shell_proto
-  include Wayland_protocols.Xdg_output_unstable_v1_proto
-  include Wayland_protocols.Gtk_primary_selection_proto
-  include Wayland_protocols.Wp_primary_selection_unstable_v1_proto
-  include Wayland_protocols.Server_decoration_proto
-end
+  on_pointer_entry : 'v.
+    surface:([< `V1 | `V2 | `V3 | `V4 ] as 'v) H.Wl_surface.t ->
+    forward_event:(unit -> unit) ->
+    unit;
+
+  set_ping : (unit -> unit Lwt.t) -> unit;
+>
 
 type t = {
   config : Config.t;
   virtwl : Wayland_virtwl.t;
+  host_transport : < S.transport; close:unit Lwt.t >;
+  host_closed : (unit, exn) Lwt_result.t;
+  host_display : Client.t;
   host_registry : Wayland.Registry.t;
+  mutable last_serial : int32;
 }
+
+let update_serial t serial = t.last_serial <- serial
 
 (* Data attached to host objects (e.g. the corresponding client object).
    Host and client versions are assumed to match. *)
@@ -71,8 +65,14 @@ module CD = struct
     client_memory : Cstruct.t;
   }
 
+  type surface_state =
+    | Ready
+    | Unconfigured of (unit -> unit) Queue.t      (* Events to forward once configured *)
+    | Destroyed
+
   type 'v surface = {
     host_surface : 'v H.Wl_surface.t;
+    mutable state : surface_state;
     mutable host_memory : Cstruct.t;
     mutable client_memory : Cstruct.t;
   }
@@ -327,7 +327,7 @@ end = struct
     t
 end
 
-let make_surface ~host_surface c =
+let make_surface ~xwayland ~host_surface c =
   let h =
     let user_data = host_data (HD.Surface c) in
     host_surface @@ object
@@ -338,49 +338,96 @@ let make_surface ~host_surface c =
     end
   in
   let h = Proxy.cast_version h in
-  let data = { CD.host_surface = h; host_memory = Cstruct.empty; client_memory = Cstruct.empty } in
+  let data =
+    let state = if xwayland = None then CD.Ready else Unconfigured (Queue.create ()) in
+    { CD.host_surface = h; host_memory = Cstruct.empty; client_memory = Cstruct.empty; state }
+  in
+  let when_configured fn =
+    match data.state with
+    | Ready -> fn ()
+    | Unconfigured q -> Queue.add fn q
+    | Destroyed -> ()
+  in
+  let state = ref `Show in      (* X11 hidden windows get [`Hide] here *)
   Proxy.Handler.attach c @@ object
     inherit [_] C.Wl_surface.v1
     method! user_data = client_data (Surface data)
 
     method on_attach _ ~buffer ~x ~y =
+      when_configured @@ fun () ->
       match buffer with
-      | Some buffer ->
+      | Some buffer when !state = `Show ->
         let Client_data (Buffer buffer) = user_data buffer in
         let buffer = Shm.map_buffer buffer in
         data.host_memory <- buffer.host_memory;
         data.client_memory <- buffer.client_memory;
         H.Wl_surface.attach h ~buffer:(Some buffer.host_buffer) ~x ~y
-      | None ->
+      | _ ->
         data.host_memory <- Cstruct.empty;
         data.client_memory <- Cstruct.empty;
         H.Wl_surface.attach h ~buffer:None ~x ~y
 
     method on_commit _ =
+      when_configured @@ fun () ->
       (* todo: only copy the bit that changed *)
       Cstruct.blit data.client_memory 0 data.host_memory 0 (Cstruct.length data.client_memory);
       H.Wl_surface.commit h
-    method on_damage _ ~x ~y ~width ~height = H.Wl_surface.damage h ~x ~y ~width ~height
-    method on_damage_buffer _ ~x ~y ~width ~height = H.Wl_surface.damage_buffer h ~x ~y ~width ~height
-    method on_destroy = delete_with H.Wl_surface.destroy h
+
+    method on_damage _ ~x ~y ~width ~height =
+      when_configured @@ fun () ->
+      H.Wl_surface.damage h ~x ~y ~width ~height
+
+    method on_damage_buffer _ ~x ~y ~width ~height =
+      when_configured @@ fun () ->
+      H.Wl_surface.damage_buffer h ~x ~y ~width ~height
+
+    method on_destroy =
+      data.state <- Destroyed;
+      xwayland |> Option.iter (fun (x:xwayland_hooks) -> x#on_destroy_surface h);
+      delete_with H.Wl_surface.destroy h
+
     method on_frame _ callback =
+      when_configured @@ fun () ->
       let _ : _ Proxy.t = H.Wl_surface.frame h @@ Wayland.callback @@ fun callback_data ->
         C.Wl_callback.done_ callback ~callback_data;
         Proxy.delete callback
       in
       Proxy.Handler.attach callback @@ new C.Wl_callback.v1
-    method on_set_input_region _ ~region = H.Wl_surface.set_input_region h ~region:(Option.map to_host region)
-    method on_set_opaque_region _ ~region = H.Wl_surface.set_opaque_region h ~region:(Option.map to_host region)
-    method on_set_buffer_scale _ = H.Wl_surface.set_buffer_scale h
-    method on_set_buffer_transform _ = H.Wl_surface.set_buffer_transform h
-  end
 
-let make_compositor bind proxy =
+    method on_set_input_region _ ~region =
+      when_configured @@ fun () ->
+      H.Wl_surface.set_input_region h ~region:(Option.map to_host region)
+
+    method on_set_opaque_region _ ~region =
+      when_configured @@ fun () ->
+      H.Wl_surface.set_opaque_region h ~region:(Option.map to_host region)
+
+    method on_set_buffer_scale _ ~scale =
+      when_configured @@ fun () ->
+      H.Wl_surface.set_buffer_scale h ~scale
+
+    method on_set_buffer_transform _ ~transform =
+      when_configured @@ fun () ->
+      H.Wl_surface.set_buffer_transform h ~transform
+  end;
+  xwayland |> Option.iter (fun (x:xwayland_hooks) ->
+      let set_configured s =
+        state := s;
+        match data.state with
+        | Ready | Destroyed -> ()
+        | Unconfigured q ->
+          data.state <- Ready;
+          Queue.iter (fun f -> f ()) q
+      in
+      x#on_create_surface h c ~set_configured
+    )
+
+let make_compositor ~xwayland bind proxy =
   let h = bind @@ new H.Wl_compositor.v1 in
   Proxy.Handler.attach proxy @@ object
     inherit [_] C.Wl_compositor.v1
     method on_create_region _ = make_region ~host_region:(H.Wl_compositor.create_region h)
-    method on_create_surface _ = make_surface ~host_surface:(H.Wl_compositor.create_surface h)
+    method on_create_surface _ = make_surface ~xwayland ~host_surface:(H.Wl_compositor.create_surface h)
   end
 
 let make_subsurface ~host_subsurface c =
@@ -452,7 +499,47 @@ let make_output bind c =
     method on_release = delete_with H.Wl_output.release (cv h)
   end
 
-let make_seat bind c =
+let make_pointer t ~xwayland ~host_seat c =
+  let c = cv c in
+  let h : _ Proxy.t = H.Wl_seat.get_pointer host_seat @@ object
+      inherit [_] H.Wl_pointer.v1
+      method on_axis _ = C.Wl_pointer.axis c
+      method on_axis_discrete _ = C.Wl_pointer.axis_discrete c
+      method on_axis_source _ = C.Wl_pointer.axis_source c
+      method on_axis_stop _ = C.Wl_pointer.axis_stop c
+
+      method on_button _ ~serial ~time ~button ~state =
+        update_serial t serial;
+        C.Wl_pointer.button c ~serial ~time ~button ~state
+
+      method on_enter _ ~serial ~surface ~surface_x ~surface_y =
+        update_serial t serial;
+        let forward_event () =
+          C.Wl_pointer.enter c ~serial ~surface:(to_client surface) ~surface_x ~surface_y
+        in
+        match xwayland with
+        | None -> forward_event ()
+        | Some (xwayland:xwayland_hooks) ->
+          xwayland#on_pointer_entry ~surface ~forward_event
+
+      method on_leave _ ~serial ~surface =
+        update_serial t serial;
+        C.Wl_pointer.leave c ~serial ~surface:(to_client surface)
+
+      method on_motion _ = C.Wl_pointer.motion c
+      method on_frame _ = C.Wl_pointer.frame c
+    end
+  in
+  Proxy.Handler.attach c @@ object
+    inherit [_] C.Wl_pointer.v1
+    method on_set_cursor _ ~serial ~surface ~hotspot_x ~hotspot_y =
+      H.Wl_pointer.set_cursor h ~serial ~surface:(Option.map to_host surface) ~hotspot_x ~hotspot_y
+
+    method on_release t =
+      delete_with H.Wl_pointer.release h t
+  end
+
+let make_seat ~xwayland t bind c =
   let c = Proxy.cast_version c in
   let cap_mask = C.Wl_seat.Capability.(Int32.logor keyboard pointer) in
   let host = bind @@ object
@@ -474,10 +561,17 @@ let make_seat bind c =
           method on_keymap    _ ~format ~fd ~size =
             C.Wl_keyboard.keymap keyboard ~format ~fd ~size;
             Unix.close fd
-          method on_enter     _ ~serial ~surface = C.Wl_keyboard.enter keyboard ~serial ~surface:(to_client surface)
-          method on_leave     _ ~serial ~surface = C.Wl_keyboard.leave keyboard ~serial ~surface:(to_client surface)
-          method on_key       _ = C.Wl_keyboard.key keyboard
-          method on_modifiers _ = C.Wl_keyboard.modifiers keyboard
+          method on_enter     _ ~serial ~surface = update_serial t serial; C.Wl_keyboard.enter keyboard ~serial ~surface:(to_client surface)
+          method on_leave     _ ~serial ~surface = update_serial t serial; C.Wl_keyboard.leave keyboard ~serial ~surface:(to_client surface)
+
+          method on_key       _ ~serial ~time ~key ~state =
+            update_serial t serial;
+            C.Wl_keyboard.key keyboard ~serial ~time ~key ~state
+
+          method on_modifiers _ ~serial ~mods_depressed ~mods_latched ~mods_locked ~group =
+            update_serial t serial;
+            C.Wl_keyboard.modifiers keyboard ~serial ~mods_depressed ~mods_latched ~mods_locked ~group
+
           method on_repeat_info _ = C.Wl_keyboard.repeat_info (cv keyboard)
         end
       in
@@ -486,27 +580,7 @@ let make_seat bind c =
         method on_release = delete_with H.Wl_keyboard.release h
       end
 
-    method on_get_pointer _ c =
-      let c = cv c in
-      let h : _ Proxy.t = H.Wl_seat.get_pointer host @@ object
-          inherit [_] H.Wl_pointer.v1
-          method on_axis _ = C.Wl_pointer.axis c
-          method on_axis_discrete _ = C.Wl_pointer.axis_discrete c
-          method on_axis_source _ = C.Wl_pointer.axis_source c
-          method on_axis_stop _ = C.Wl_pointer.axis_stop c
-          method on_button _ = C.Wl_pointer.button c
-          method on_enter _ ~serial ~surface = C.Wl_pointer.enter c ~serial ~surface:(to_client surface)
-          method on_leave _ ~serial ~surface = C.Wl_pointer.leave c ~serial ~surface:(to_client surface)
-          method on_motion _ = C.Wl_pointer.motion c
-          method on_frame _ = C.Wl_pointer.frame c
-        end
-      in
-      Proxy.Handler.attach c @@ object
-        inherit [_] C.Wl_pointer.v1
-        method on_set_cursor _ ~serial ~surface = H.Wl_pointer.set_cursor h ~serial ~surface:(Option.map to_host surface)
-        method on_release = delete_with H.Wl_pointer.release h
-      end
-
+    method on_get_pointer _ c = make_pointer ~xwayland t ~host_seat:host c
     method on_get_touch _ = Fmt.failwith "TODO: on_get_touch"
     method on_release = delete_with H.Wl_seat.release host
   end
@@ -606,10 +680,13 @@ let make_positioner ~host_positioner c =
     method on_set_parent_configure _ = H.Xdg_positioner.set_parent_configure h
   end
 
-let make_xdg_wm_base ~tag bind proxy =
+let make_xdg_wm_base ~xwayland ~tag bind proxy =
+  let pong_handlers = Queue.create () in
   let h = bind @@ object
       inherit [_] H.Xdg_wm_base.v1
-      method on_ping _ = C.Xdg_wm_base.ping proxy
+      method on_ping h ~serial =
+        Queue.add (H.Xdg_wm_base.pong h) pong_handlers;
+        C.Xdg_wm_base.ping proxy ~serial
     end
   in
   let h = Proxy.cast_version h in
@@ -617,14 +694,27 @@ let make_xdg_wm_base ~tag bind proxy =
     inherit [_] C.Xdg_wm_base.v1
 
     method on_destroy = delete_with H.Xdg_wm_base.destroy h
-    method on_pong _ = H.Xdg_wm_base.pong h
+
+    method on_pong _ ~serial =
+      match Queue.take_opt pong_handlers with
+      | Some h -> h ~serial
+      | None -> Log.warn (fun f -> f "Ignoring unexpected pong from client!")
 
     method on_create_positioner _ = make_positioner ~host_positioner:(H.Xdg_wm_base.create_positioner h)
 
     method on_get_xdg_surface _ xdg_surface ~surface =
       let host_xdg_surface = H.Xdg_wm_base.get_xdg_surface h ~surface:(to_host surface) in
       make_xdg_surface ~tag ~host_xdg_surface xdg_surface
-  end
+  end;
+  xwayland |> Option.iter (fun (x:xwayland_hooks) ->
+      x#set_ping (fun () ->
+          let serial = 0l in
+          let pong, set_pong = Lwt.wait () in
+          Queue.add (fun ~serial:_ -> Lwt.wakeup set_pong ()) pong_handlers;
+          C.Xdg_wm_base.ping proxy ~serial;
+          pong
+        )
+    )
 
 let make_zxdg_output ~host_xdg_output c =
   let c = cv c in
@@ -920,19 +1010,19 @@ let pp_closed f = function
 let registry =
   let open Protocols in
   [
-    (module Wl_compositor : Metadata.S);
+    (module Wl_shm : Metadata.S);
+    (module Wl_compositor);
     (module Wl_subcompositor);
-    (module Wl_shm);
     (module Xdg_wm_base);
-    (module Wl_output);
     (module Wl_data_device_manager);
     (module Zxdg_output_manager_v1);
     (module Zwp_primary_selection_device_manager_v1);
-    (module Wl_seat); (* Must come after gtk, or evince crashes *)
+    (module Wl_seat); (* Must come after primary selection device, or evince crashes *)
+    (module Wl_output);
     (module Org_kde_kwin_server_decoration_manager);
   ]
 
-let make_registry t reg =
+let make_registry ~xwayland t reg =
   let registry =
     registry |> List.concat_map (fun (module M : Metadata.S) ->
         match Registry.get t.host_registry M.interface with
@@ -972,15 +1062,15 @@ let make_registry t reg =
       let open Protocols in
       let proxy = Proxy.cast_version proxy in
       match Proxy.ty proxy with
-      | Wl_compositor.T -> make_compositor bind proxy
+      | Wl_compositor.T -> make_compositor ~xwayland bind proxy
       | Wl_subcompositor.T -> make_subcompositor bind proxy
       | Wl_shm.T -> make_shm ~virtwl:t.virtwl bind proxy
-      | Wl_seat.T -> make_seat bind proxy
+      | Wl_seat.T -> make_seat ~xwayland t bind proxy
       | Wl_output.T -> make_output bind proxy
       | Wl_data_device_manager.T -> make_data_device_manager ~virtwl:t.virtwl bind proxy
       | Gtk_primary_selection_device_manager.T -> Gtk_primary.make_device_manager ~virtwl:t.virtwl bind proxy
       | Zwp_primary_selection_device_manager_v1.T -> Zwp_primary.make_device_manager ~virtwl:t.virtwl bind proxy
-      | Xdg_wm_base.T -> make_xdg_wm_base ~tag:t.config.tag bind proxy
+      | Xdg_wm_base.T -> make_xdg_wm_base ~xwayland ~tag:t.config.tag bind proxy
       | Zxdg_output_manager_v1.T -> make_zxdg_output_manager_v1 bind proxy
       | Org_kde_kwin_server_decoration_manager.T -> make_kde_decoration_manager bind proxy
       | _ -> Fmt.failwith "Invalid service name for %a" Proxy.pp proxy
@@ -990,25 +1080,31 @@ let make_registry t reg =
       C.Wl_registry.global reg ~name:(Int32.of_int name) ~interface:M.interface ~version
     )
 
-let handle ~config client =
-  let client_transport = Wayland.Unix_transport.of_socket client in
+let create config =
   let fd = Unix.(openfile "/dev/wl0" [O_RDWR; O_CLOEXEC] 0x600) in
   let virtwl = Wayland_virtwl.of_fd fd in
   let host_transport = Wayland_virtwl.new_context virtwl in
-  let display, host_closed = Wayland.Client.connect ~trace:(module Trace.Host) host_transport in
-  let* host_registry = Wayland.Registry.of_display display in
-  let t = {
+  let host_display, host_closed = Wayland.Client.connect ~trace:(module Trace.Host) host_transport in
+  let* host_registry = Wayland.Registry.of_display host_display in
+  Lwt.return {
     virtwl;
+    host_transport;
+    host_closed;
+    host_display;
     host_registry;
     config;
-  } in
+    last_serial = 0l;
+  }
+
+let accept ?xwayland t client =
+  let client_transport = Wayland.Unix_transport.of_socket client in
   let s : Server.t =
     Server.connect client_transport ~trace:(module Trace.Client) @@ object
       inherit [_] C.Wl_display.v1
-      method on_get_registry _ ref = make_registry t ref
+      method on_get_registry _ ref = make_registry ~xwayland t ref
       method on_sync _ cb =
         Proxy.Handler.attach cb @@ new C.Wl_callback.v1;
-        let h : _ Proxy.t = H.Wl_display.sync (Client.wl_display display) @@ object
+        let h : _ Proxy.t = H.Wl_display.sync (Client.wl_display t.host_display) @@ object
             inherit [_] H.Wl_callback.v1
             method on_done ~callback_data =
               C.Wl_callback.done_ cb ~callback_data
@@ -1024,10 +1120,10 @@ let handle ~config client =
       Log.info (fun f -> f "Client %a" pp_closed r);
       is_active := false
     );
-    host_transport#close
+    t.host_transport#close
   in
   let host_done =
-    let* r = host_closed in
+    let* r = t.host_closed in
     if !is_active then (
       Log.info (fun f -> f "Host %a" pp_closed r);
       is_active := false
@@ -1036,5 +1132,14 @@ let handle ~config client =
     Lwt.return_unit
   in
   let* () = Lwt.choose [client_done; host_done] in
-  Unix.close virtwl;
-  Lwt_unix.close client
+  Unix.close t.virtwl;
+  Lwt.return_unit
+
+let registry t = t.host_registry
+let virtwl t = t.virtwl
+let last_serial t = t.last_serial
+
+let set_from_host_paused t = Wayland.Client.set_paused t.host_display
+
+let dump f t =
+  Client.dump f t.host_display

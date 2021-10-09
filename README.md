@@ -1,7 +1,5 @@
 # A virtwl Wayland proxy for VMs
 
-Status: **prototyping**
-
 `wayland-proxy-virtwl` runs inside a VM, offering a Wayland socket to applications.
 It proxies all requests to the host Wayland compositor using the virtwl Linux module.
 See https://alyssa.is/using-virtio-wl/ for some background.
@@ -16,7 +14,7 @@ It is similar to the [sommelier][] proxy from ChromiumOS, but written in OCaml.
 It adds support for the primary selection, and aims to be easier to modify and less segfaulty.
 It uses the [ocaml-wayland][] library.
 
-It is able to proxy Evince and Firefox at least.
+It is able to proxy Evince and Firefox at least, and also works with Xwayland well enough to run gvim.
 
 ## Installation
 
@@ -36,24 +34,51 @@ I use the following systemd file to run the proxy
 Description=Wayland-proxy-virtwl
 
 [Service]
-ExecStart=/path/to/wayland-proxy-virtwl --tag="[my-vm] " --wayland-display wayland-0
+ExecStart=/path/to/wayland-proxy-virtwl --tag="[my-vm] " --wayland-display wayland-0 --x-display=0 --xrdb Xft.dpi:150
 
 [Install]
 WantedBy=default.target
 ```
+
+## Xwayland support
+
+If you run with `--x-display=0` then it listens on the abstract socket `@/tmp/.X11-unix/X0` for X11 clients.
+If one tries to connect, it spawns an Xwayland process to handle it (and any future X11 clients).
+
+Xwayland is an X server that renders application window contents to Wayland surfaces.
+wayland-proxy-virtwl acts as a window manager to integrate these surfaces into the Wayland desktop
+(e.g. by reading the `WM_NAME` X11 property and setting it as the `xdg_toplevel`'s title).
+
+This is rather complicated. The following features mostly work:
+
+- Toplevel windows and dialogs are given the appropriate xdg-shell roles.
+- The title is set from `WM_NAME`.
+- Popup menus and tooltips work.
+- The PRIMARY and CLIPBOARD selections are connected to the corresponding Wayland APIs.
+- Pointer and keyboard events work.
+
+You can use the `--xrdb 'KEY:VALUE'` option to set default settings in the xrdb database.
+For example, `--xrdb Xft.dpi:150` is useful on high-DPI screens.
+
+Limitations:
+
+- It has only been tested with Sway so far, and might need some adjustments for a non-tiling compositor.
+
+- Drag-and-drop will not work, even between X applications, as the (hidden) X11 window layout used by X11 applications does not match the Wayland compositor's layout. Wayland does not provide layout information to us, so there's not much that can be done here.
 
 ## Logging
 
 There are several ways to enable logging:
 
 - Running with `--verbose` will turn on all info-level logging.
-- Setting e.g. `WAYLAND_DEBUG_PROXY=client,server` will turn on info-level debugging for the listed components.
+- Setting e.g. `WAYLAND_DEBUG_PROXY=client,server,xwayland` will turn on info-level debugging for the listed components.
 - If `WAYLAND_DEBUG_PROXY` isn't set, `WAYLAND_DEBUG` is used instead. Setting this will also affect child processes.
 
 The available log sources are:
 
 - `client` -- log Wayland messages between the relay and the client applications.
 - `server` -- log Wayland messages between the relay and the host compositor.
+- `xwayland` -- log X11 messages between the relay and Xwayland.
 
 You can also suppress certain classes of log messages using e.g. `--log-suppress motion,shm,delete,region,drawing,hints`.
 The classes are:

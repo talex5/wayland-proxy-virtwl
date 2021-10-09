@@ -1,6 +1,7 @@
 (executable
   (name main)
   (public_name wayland-proxy-virtwl)
-  (libraries wayland wayland.protocols wayland_virtwl cmdliner))
+  (preprocess (pps ppx_cstruct))
+  (libraries wayland wayland.protocols wayland_virtwl cmdliner cstruct-lwt fmt.tty x11))
 
 (vendored_dirs ocaml-wayland)
