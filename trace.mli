@@ -3,4 +3,4 @@ module Host : Wayland.Client.TRACE
 
 val pp_status : Unix.process_status Fmt.t
 
-val cmdliner : (unit -> unit) Cmdliner.Term.t
+val cmdliner : (wayland_display:string -> unit Lwt.t) Cmdliner.Term.t

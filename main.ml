@@ -66,8 +66,8 @@ let listen_x11 ~config x_display =
   Unix.putenv "DISPLAY" (Printf.sprintf ":%d" x_display)
 
 let main setup_tracing wayland_display x_display config args =
-  setup_tracing ();
   Lwt_main.run begin
+    let* () = setup_tracing ~wayland_display in
     (* Listen for incoming Wayland client connections: *)
     let*! () = listen_wayland ~config wayland_display in
     (* Listen for incoming X11 client connections, if configured: *)
