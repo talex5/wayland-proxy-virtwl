@@ -116,4 +116,68 @@ let handle_async_error ex =
   Log.err (fun f -> f "Uncaught async exception: %a" Fmt.exn_backtrace (ex, bt))
 
 let () =
-  Lwt.async_exception_hook := handle_async_error
+  Lwt.async_exception_hook := handle_async_error;
+  Fmt_tty.setup_std_outputs ();
+  Logs.set_reporter reporter;
+  Printexc.record_backtrace true
+
+let setup_logging ~verbose ~log_suppress =
+  let log_level = if verbose then Logs.Info else Logs.Warning in
+  Logs.(set_level (Some log_level));
+  let wayland_env, wayland =
+    match Sys.getenv_opt "WAYLAND_DEBUG_PROXY" with
+    | Some x -> "WAYLAND_DEBUG_PROXY", x
+    | None -> "WAYLAND_DEBUG", (Sys.getenv_opt "WAYLAND_DEBUG" |> Option.value ~default:"")
+  in
+  let wayland =
+    if wayland = "1" then ["client"; "server"]
+    else String.split_on_char ',' wayland
+  in
+  wayland |> List.iter (function
+      | "client" -> Logs.Src.set_level Client.src (Some Logs.Info)
+      | "server" -> Logs.Src.set_level Host.src (Some Logs.Info)
+      | "xwayland" ->
+        Logs.Src.set_level X11.log_src (Some Logs.Info);
+        Logs.Src.set_level Log.xwayland_src (Some Logs.Info)
+      | "" -> ()
+      | x -> Log.warn (fun f -> f "Unknown $%s item %S" wayland_env x)
+    );
+  log_suppress |> List.iter (function
+      | `Motion -> motion := false
+      | `Shm -> shm := false
+      | `Delete -> delete := false
+      | `Region -> region := false
+      | `Drawing -> drawing := false
+      | `Hints -> hints := false
+    )
+
+open Cmdliner
+
+let verbose =
+  Arg.value @@
+  Arg.flag @@
+  Arg.info
+    ~doc:"Verbose logging"
+    ["v"; "verbose"]
+
+let suppress = Arg.enum [
+    "motion", `Motion;
+    "shm", `Shm;
+    "delete", `Delete;
+    "region", `Region;
+    "drawing", `Drawing;
+    "hints", `Hints;
+  ]
+
+let log_suppress =
+  Arg.value @@
+  Arg.(opt (list suppress)) [] @@
+  Arg.info
+    ~doc:"Suppress some log messages"
+    ["log-suppress"]
+
+let cmdliner =
+  let make verbose log_suppress () =
+    setup_logging ~verbose ~log_suppress
+  in
+  Term.(const make $ verbose $ log_suppress)
