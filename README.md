@@ -60,6 +60,10 @@ This is rather complicated. The following features mostly work:
 You can use the `--xrdb 'KEY:VALUE'` option to set default settings in the xrdb database.
 For example, `--xrdb Xft.dpi:150` is useful on high-DPI screens.
 
+Xwayland doesn't support Wayland's HiDPI feature, which causes the compositor to double everything in size,
+which is often blurry and unusable. To fix this, use e.g. `--x-unscale=2` to reverse this transformation
+(and then just configure the X11 apps to use a larger font).
+
 Limitations:
 
 - It has only been tested with Sway so far, and might need some adjustments for a non-tiling compositor.

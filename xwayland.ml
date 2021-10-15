@@ -72,6 +72,15 @@ type t = {
   mutable wayland_ping : unit -> unit Lwt.t;
 }
 
+let scale_to_client t (x, y) =
+  x * t.config.xunscale,
+  y * t.config.xunscale
+
+(* We round up, as otherwise popup menus can be one pixel too short and GTK adds scrollers *)
+let scale_to_host t (x, y) =
+  (x + t.config.xunscale - 1) / t.config.xunscale,
+  (y + t.config.xunscale - 1) / t.config.xunscale
+
 let intern ?only_if_exists t name =
   let* x11 = t.x11 in
   X11.Atom.intern ?only_if_exists x11 name
@@ -542,7 +551,10 @@ let init_toplevel t ~x11 ~xdg_surface ~info window =
         let width = Int32.to_int width in
         let height = Int32.to_int height in
         if width > 0 && height > 0 then (
-          Lwt.async (fun () -> X11.Window.configure x11 window ~width ~height ~border_width:0)
+          Lwt.async (fun () ->
+              let (width, height) = scale_to_client t (width, height) in
+              X11.Window.configure x11 window ~width ~height ~border_width:0
+            )
         )
 
       method on_close _ =
@@ -571,6 +583,9 @@ let init_toplevel t ~x11 ~xdg_surface ~info window =
   Xdg_decoration.set_mode decor ~mode:Xdg_decoration.Mode.Server_side;
   Xdg_toplevel.set_title toplevel ~title:(t.config.tag ^ info.title);
   X11.Icccm.Wm_normal_hints.min_size info.wm_normal_hints |> Option.iter (fun (width, height) ->
+      let scale = Int32.of_int t.config.xunscale in
+      let width = Int32.div width scale in
+      let height = Int32.div height scale in
       Xdg_toplevel.set_min_size toplevel ~width ~height
     );
   toplevel
@@ -581,10 +596,12 @@ let init_popup t ~x11 ~xdg_surface ~info ~parent window =
   let geometry = info.geometry in
   Log.debug (fun f -> f "Parent geom: %a" X11.Geometry.pp (parent:paired).geometry);
   Log.debug (fun f -> f "Popup geom: %a" X11.Geometry.pp geometry);
-  let x = Int32.of_int (geometry.x - parent.geometry.x) in
-  let y = Int32.of_int (geometry.y - parent.geometry.y) in
-  Xdg_positioner.set_size positioner ~width:(Int32.of_int geometry.width) ~height:(Int32.of_int geometry.height);
-  Xdg_positioner.set_anchor_rect positioner ~x ~y ~width:1l ~height:1l;
+  let x = (geometry.x - parent.geometry.x) in
+  let y = (geometry.y - parent.geometry.y) in
+  let (x, y) = scale_to_host t (x, y) in
+  let (width, height) = scale_to_host t (geometry.width, geometry.height) in
+  Xdg_positioner.set_size positioner ~width:(Int32.of_int width) ~height:(Int32.of_int height);
+  Xdg_positioner.set_anchor_rect positioner ~x:(Int32.of_int x) ~y:(Int32.of_int y) ~width:1l ~height:1l;
   Xdg_positioner.set_anchor positioner ~anchor:Xdg_positioner.Anchor.Top_left;
   Xdg_positioner.set_gravity positioner ~gravity:Xdg_positioner.Gravity.Bottom_right;
   let popup = Xdg_surface.get_popup xdg_surface ~parent:(Some parent.xdg_surface) ~positioner @@ object
@@ -592,7 +609,10 @@ let init_popup t ~x11 ~xdg_surface ~info ~parent window =
       method on_configure _ ~x:_ ~y:_ ~width ~height =
         let width = Int32.to_int width in
         let height = Int32.to_int height in
-        if width > 0 && height > 0 then (
+        (* For override_redirect windows, let them use their preferred size.
+           This may violate the Wayland spec if unscaling is being used, but Sway allows it and it looks much better. *)
+        if width > 0 && height > 0 && not info.win_attrs.override_redirect then (
+          let (width, height) = scale_to_client t (width, height) in
           Lwt.async (fun () -> X11.Window.configure x11 window ~width ~height ~border_width:0)
         )
       method on_popup_done _ = ()               (* todo: maybe notify the X application about this? *)
@@ -811,7 +831,11 @@ let listen_x11 ~selection t =
     (* todo: send a synthetic ConfigureNotify event if nothing changed *)
     method configure_request ~window ~width ~height =
       match Hashtbl.find_opt t.paired window with
-      | None -> X11.Window.configure x11 window ~width ~height ~border_width:0
+      | None ->
+        (* In theory, we must ensure the size is a multiple of the scale factor, as the Wayland spec requires this.
+           However, this makes some windows look ugly, and Sway seems to allow any size. *)
+        (* let (width, height) = scale_to_host t (width, height) |> scale_to_client t in *)
+        X11.Window.configure x11 window ~width ~height ~border_width:0
       | Some p ->
         (* For now, don't allow apps to change their own size once mapped. *)
         Log.info (fun f -> f "Ignoring ConfigureRequest for already-mapped window %a" pp_paired p);
@@ -951,6 +975,8 @@ let handle_xwayland ~config ~local_wayland ~local_wm_socket =
 
     method set_ping fn =
       t.wayland_ping <- fn
+
+    method scale = Int32.of_int t.config.xunscale
   end in
   let xrdb = String.concat "\n" config.xrdb in
   Lwt.join [

@@ -31,7 +31,34 @@ type xwayland_hooks = <
     unit;
 
   set_ping : (unit -> unit Lwt.t) -> unit;
+
+  scale : int32;
 >
+
+let scale_to_client ~xwayland (x, y) =
+  match xwayland with
+  | None -> (x, y)
+  | Some xw ->
+    let scale = xw#scale in
+    (Int32.mul x scale, Int32.mul y scale)
+
+let scale_to_host ~xwayland (x, y) =
+  match xwayland with
+  | None -> (x, y)
+  | Some xw ->
+    let scale = xw#scale in
+    (Int32.div x scale, Int32.div y scale)
+
+let point_to_client ~xwayland (x, y) =
+  match xwayland with
+  | None -> (x, y)
+  | Some xw ->
+    let scale = xw#scale in
+    if scale = 1l then (x, y)
+    else (
+      Fixed.of_bits (Int32.mul (Fixed.to_bits x) scale),
+      Fixed.of_bits (Int32.mul (Fixed.to_bits y) scale)
+    )
 
 type t = {
   config : Config.t;
@@ -354,6 +381,7 @@ let make_surface ~xwayland ~host_surface c =
     method! user_data = client_data (Surface data)
 
     method on_attach _ ~buffer ~x ~y =
+      let (x, y) = scale_to_host ~xwayland (x, y) in
       when_configured @@ fun () ->
       match buffer with
       | Some buffer when !state = `Show ->
@@ -375,6 +403,8 @@ let make_surface ~xwayland ~host_surface c =
 
     method on_damage _ ~x ~y ~width ~height =
       when_configured @@ fun () ->
+      let (x, y) = scale_to_host ~xwayland (x, y) in
+      let (width, height) = scale_to_host ~xwayland (width, height) in
       H.Wl_surface.damage h ~x ~y ~width ~height
 
     method on_damage_buffer _ ~x ~y ~width ~height =
@@ -411,6 +441,8 @@ let make_surface ~xwayland ~host_surface c =
       H.Wl_surface.set_buffer_transform h ~transform
   end;
   xwayland |> Option.iter (fun (x:xwayland_hooks) ->
+      if x#scale <> 1l then
+        H.Wl_surface.set_buffer_scale h ~scale:x#scale;       (* Xwayland will be a new enough version *)
       let set_configured s =
         state := s;
         match data.state with
@@ -430,7 +462,7 @@ let make_compositor ~xwayland bind proxy =
     method on_create_surface _ = make_surface ~xwayland ~host_surface:(H.Wl_compositor.create_surface h)
   end
 
-let make_subsurface ~host_subsurface c =
+let make_subsurface ~xwayland ~host_subsurface c =
   let h = host_subsurface @@ new H.Wl_subsurface.v1 in
   Proxy.Handler.attach c @@ object
     inherit [_] C.Wl_subsurface.v1
@@ -438,11 +470,15 @@ let make_subsurface ~host_subsurface c =
     method on_place_above _ ~sibling = H.Wl_subsurface.place_above h ~sibling:(to_host sibling)
     method on_place_below _ ~sibling = H.Wl_subsurface.place_below h ~sibling:(to_host sibling)
     method on_set_desync _ = H.Wl_subsurface.set_desync h
-    method on_set_position _ = H.Wl_subsurface.set_position h
+
+    method on_set_position _ ~x ~y =
+      let (x, y) = scale_to_host ~xwayland (x, y) in
+      H.Wl_subsurface.set_position h ~x ~y
+
     method on_set_sync _ = H.Wl_subsurface.set_sync h
   end
 
-let make_subcompositor bind proxy =
+let make_subcompositor ~xwayland bind proxy =
   let h = bind @@ new H.Wl_subcompositor.v1 in
   Proxy.Handler.attach proxy @@ object
     inherit [_] C.Wl_subcompositor.v1
@@ -452,7 +488,7 @@ let make_subcompositor bind proxy =
       let surface = to_host surface in
       let parent = to_host parent in
       let host_subsurface = H.Wl_subcompositor.get_subsurface h ~surface ~parent in
-      make_subsurface ~host_subsurface subsurface
+      make_subsurface ~xwayland ~host_subsurface subsurface
   end
 
 let make_buffer b proxy =
@@ -479,7 +515,7 @@ let make_shm_pool ~virtwl ~host_shm proxy ~fd:client_fd ~size:orig_size =
     method on_resize _ ~size = Shm.resize mapping size
   end
 
-let make_output bind c =
+let make_output ~xwayland bind c =
   let c = Proxy.cast_version c in
   let h =
     let user_data = host_data (HD.Output c) in
@@ -489,7 +525,14 @@ let make_output bind c =
       method on_done _ = C.Wl_output.done_ (Proxy.cast_version c)
       method on_geometry _ = C.Wl_output.geometry c
       method on_mode _ = C.Wl_output.mode c
-      method on_scale  _ = C.Wl_output.scale (Proxy.cast_version c)
+
+      method on_scale _ ~factor =
+        let factor =
+          match xwayland with
+          | Some x -> Int32.div factor x#scale
+          | None -> factor
+        in
+        C.Wl_output.scale (Proxy.cast_version c) ~factor
     end
   in
   let user_data = client_data (Output h) in
@@ -514,6 +557,7 @@ let make_pointer t ~xwayland ~host_seat c =
 
       method on_enter _ ~serial ~surface ~surface_x ~surface_y =
         update_serial t serial;
+        let (surface_x, surface_y) = point_to_client ~xwayland (surface_x, surface_y) in
         let forward_event () =
           C.Wl_pointer.enter c ~serial ~surface:(to_client surface) ~surface_x ~surface_y
         in
@@ -526,13 +570,18 @@ let make_pointer t ~xwayland ~host_seat c =
         update_serial t serial;
         C.Wl_pointer.leave c ~serial ~surface:(to_client surface)
 
-      method on_motion _ = C.Wl_pointer.motion c
+      method on_motion _ ~time ~surface_x ~surface_y =
+        let (surface_x, surface_y) = point_to_client ~xwayland (surface_x, surface_y) in
+        C.Wl_pointer.motion c ~time ~surface_x ~surface_y
+
       method on_frame _ = C.Wl_pointer.frame c
     end
   in
   Proxy.Handler.attach c @@ object
     inherit [_] C.Wl_pointer.v1
+
     method on_set_cursor _ ~serial ~surface ~hotspot_x ~hotspot_y =
+      let (hotspot_x, hotspot_y) = scale_to_host ~xwayland (hotspot_x, hotspot_y) in
       H.Wl_pointer.set_cursor h ~serial ~surface:(Option.map to_host surface) ~hotspot_x ~hotspot_y
 
     method on_release t =
@@ -716,14 +765,21 @@ let make_xdg_wm_base ~xwayland ~tag bind proxy =
         )
     )
 
-let make_zxdg_output ~host_xdg_output c =
+let make_zxdg_output ~xwayland ~host_xdg_output c =
   let c = cv c in
   let h = host_xdg_output @@ object
       inherit [_] H.Zxdg_output_v1.v1
       method on_description _ = C.Zxdg_output_v1.description c
       method on_done _ = C.Zxdg_output_v1.done_ c
-      method on_logical_position _ = C.Zxdg_output_v1.logical_position c
-      method on_logical_size _ = C.Zxdg_output_v1.logical_size c
+
+      method on_logical_position _ ~x ~y =
+        let (x, y) = scale_to_client ~xwayland (x, y) in
+        C.Zxdg_output_v1.logical_position c ~x ~y
+
+      method on_logical_size _ ~width ~height =
+        let (width, height) = scale_to_client ~xwayland (width, height) in
+        C.Zxdg_output_v1.logical_size c ~width ~height
+
       method on_name _ = C.Zxdg_output_v1.name c
     end in
   Proxy.Handler.attach c @@ object
@@ -731,7 +787,7 @@ let make_zxdg_output ~host_xdg_output c =
     method on_destroy = delete_with H.Zxdg_output_v1.destroy h
   end
 
-let make_zxdg_output_manager_v1 bind proxy =
+let make_zxdg_output_manager_v1 ~xwayland bind proxy =
   let proxy = Proxy.cast_version proxy in
   let h = bind @@ new H.Zxdg_output_manager_v1.v1 in
   Proxy.Handler.attach proxy @@ object
@@ -741,7 +797,7 @@ let make_zxdg_output_manager_v1 bind proxy =
 
     method on_get_xdg_output _ c ~output =
       let output = to_host output in
-      make_zxdg_output ~host_xdg_output:(H.Zxdg_output_manager_v1.get_xdg_output h ~output) c
+      make_zxdg_output ~xwayland ~host_xdg_output:(H.Zxdg_output_manager_v1.get_xdg_output h ~output) c
   end
 
 let make_kde_decoration ~host_decoration c =
@@ -816,16 +872,23 @@ let make_data_source ~host_source c =
     method on_set_actions _ = H.Wl_data_source.set_actions h
   end
 
-let make_data_device ~virtwl ~host_device c =
+let make_data_device ~xwayland ~virtwl ~host_device c =
   let c = cv c in
   let h = host_device @@ object
       inherit [_] H.Wl_data_device.v1
       method on_data_offer _ offer = make_data_offer ~virtwl ~client_offer:(C.Wl_data_device.data_offer c) offer
       method on_drop _ = C.Wl_data_device.drop c
+
       method on_enter _ ~serial ~surface ~x ~y offer =
+        let (x, y) = point_to_client ~xwayland (x, y) in
         C.Wl_data_device.enter c ~serial ~surface:(to_client surface) ~x ~y (Option.map to_client offer)
+
       method on_leave _ = C.Wl_data_device.leave c
-      method on_motion _ = C.Wl_data_device.motion c
+
+      method on_motion _ ~time ~x ~y =
+        let (x, y) = point_to_client ~xwayland (x, y) in
+        C.Wl_data_device.motion c ~time ~x ~y
+
       method on_selection _ offer = C.Wl_data_device.selection c (Option.map to_client offer)
     end in
   Proxy.Handler.attach c @@ object
@@ -839,7 +902,7 @@ let make_data_device ~virtwl ~host_device c =
         ~icon:(Option.map to_host icon)
   end
 
-let make_data_device_manager ~virtwl bind proxy =
+let make_data_device_manager ~xwayland ~virtwl bind proxy =
   let proxy = Proxy.cast_version proxy in
   let h = cv @@ bind @@ new H.Wl_data_device_manager.v1 in
   Proxy.Handler.attach proxy @@ object
@@ -848,7 +911,7 @@ let make_data_device_manager ~virtwl bind proxy =
       make_data_source c ~host_source:(H.Wl_data_device_manager.create_data_source h)
     method on_get_data_device _ c ~seat =
       let seat = to_host seat in
-      make_data_device ~virtwl c ~host_device:(H.Wl_data_device_manager.get_data_device h ~seat)
+      make_data_device ~xwayland ~virtwl c ~host_device:(H.Wl_data_device_manager.get_data_device h ~seat)
   end
 
 module Gtk_primary = struct
@@ -1063,15 +1126,15 @@ let make_registry ~xwayland t reg =
       let proxy = Proxy.cast_version proxy in
       match Proxy.ty proxy with
       | Wl_compositor.T -> make_compositor ~xwayland bind proxy
-      | Wl_subcompositor.T -> make_subcompositor bind proxy
+      | Wl_subcompositor.T -> make_subcompositor ~xwayland bind proxy
       | Wl_shm.T -> make_shm ~virtwl:t.virtwl bind proxy
       | Wl_seat.T -> make_seat ~xwayland t bind proxy
-      | Wl_output.T -> make_output bind proxy
-      | Wl_data_device_manager.T -> make_data_device_manager ~virtwl:t.virtwl bind proxy
+      | Wl_output.T -> make_output ~xwayland bind proxy
+      | Wl_data_device_manager.T -> make_data_device_manager ~xwayland ~virtwl:t.virtwl bind proxy
       | Gtk_primary_selection_device_manager.T -> Gtk_primary.make_device_manager ~virtwl:t.virtwl bind proxy
       | Zwp_primary_selection_device_manager_v1.T -> Zwp_primary.make_device_manager ~virtwl:t.virtwl bind proxy
       | Xdg_wm_base.T -> make_xdg_wm_base ~xwayland ~tag:t.config.tag bind proxy
-      | Zxdg_output_manager_v1.T -> make_zxdg_output_manager_v1 bind proxy
+      | Zxdg_output_manager_v1.T -> make_zxdg_output_manager_v1 ~xwayland bind proxy
       | Org_kde_kwin_server_decoration_manager.T -> make_kde_decoration_manager bind proxy
       | _ -> Fmt.failwith "Invalid service name for %a" Proxy.pp proxy
   end;
