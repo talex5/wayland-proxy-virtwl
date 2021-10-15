@@ -92,6 +92,21 @@ The classes are:
 
 See [trace.ml](./trace.ml) for details.
 
+You can configure the proxy to log to an in-memory ring-buffer, and then dump that whenever an error occurs.
+Use e.g. `-v --log-ring-path ~/wayland.log` to enable this feature.
+When an uncaught exception occurs, the proxy will flush (append) the log to the given path.
+By default, it keeps about 512K of history; use `--log-ring-size` to change this.
+
+You can also force it to flush the log by writing a line to the control pipe. e.g.
+
+```
+wayland-proxy-virtwl ... -v --log-ring-path ~/wayland.log &
+echo dump-log > /run/user/1000/wayland-1-ctl
+cat ~/wayland.log
+```
+
+This is useful if an application is misbehaving and you want to check its recent interactions.
+
 ## Using virtwl directly
 
 `tests/test.ml` is a simple test application that uses the virtwl kernel interface directly

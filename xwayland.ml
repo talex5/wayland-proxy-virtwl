@@ -3,8 +3,7 @@ open Lwt.Infix
 
 let min_respawn_time = 10.0             (* Don't run Xwayland more than once per 10s *)
 
-let src = Logs.Src.create "xwayland" ~doc:"Xwayland support"
-module Log = (val Logs.src_log src : Logs.LOG)
+module Log = Log.Xwayland
 
 module Proxy = Wayland.Proxy
 module Wl_seat = Wayland.Wayland_client.Wl_seat
