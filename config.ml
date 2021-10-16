@@ -2,6 +2,7 @@ type t = {
   tag : string;
   xwayland_binary : string;
   xrdb : string list;           (* Config lines for xrdb *)
+  xunscale : int;
 }
 
 open Cmdliner
@@ -27,8 +28,15 @@ let xrdb =
     ~doc:"Initial xrdb config (e.g. 'Xft.dpi:150')"
     ["xrdb"]
 
-let make_config tag xwayland_binary xrdb =
-  { tag; xwayland_binary; xrdb }
+let xunscale =
+  Arg.value @@
+  Arg.(opt int) 1 @@
+  Arg.info
+    ~doc:"Compensate for Wayland's attempts to scale X11 apps (e.g. 2 for a HiDPI display)"
+    ["x-unscale"]
+
+let make_config tag xwayland_binary xrdb xunscale =
+  { tag; xwayland_binary; xrdb; xunscale }
 
 let cmdliner =
-  Term.(const make_config $ tag $ xwayland_binary $ xrdb)
+  Term.(const make_config $ tag $ xwayland_binary $ xrdb $ xunscale)

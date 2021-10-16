@@ -22,6 +22,9 @@ type xwayland_hooks = <
   set_ping : (unit -> unit Lwt.t) -> unit;
   (** When/if Xwayland creates an xdg_wm_base object, this is called to provide a ping function.
       This does a round-trip to the client, ensuring that all previously sent events have been delivered. *)
+
+  scale : int32;
+  (** The buffer scale to set and then use to transform coordinates (for HiDPI screens). *)
 >
 
 type t
