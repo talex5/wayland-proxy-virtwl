@@ -30,6 +30,11 @@ type xwayland_hooks = <
     forward_event:(unit -> unit) ->
     unit;
 
+  on_keyboard_entry : 'v.
+    surface:([< `V1 | `V2 | `V3 | `V4 ] as 'v) H.Wl_surface.t ->
+    forward_event:(unit -> unit) ->
+    unit;
+
   set_ping : (unit -> unit Lwt.t) -> unit;
 
   scale : int32;
@@ -588,6 +593,44 @@ let make_pointer t ~xwayland ~host_seat c =
       delete_with H.Wl_pointer.release h t
   end
 
+let make_keyboard t ~xwayland ~host_seat c =
+  let h : _ Proxy.t = H.Wl_seat.get_keyboard host_seat @@ object
+      inherit [_] H.Wl_keyboard.v1
+
+      method on_keymap _ ~format ~fd ~size =
+        C.Wl_keyboard.keymap c ~format ~fd ~size;
+        Unix.close fd
+
+      method on_enter _ ~serial ~surface ~keys =
+        update_serial t serial;
+        let forward_event () =
+          C.Wl_keyboard.enter c ~serial ~surface:(to_client surface) ~keys
+        in
+        match xwayland with
+        | None -> forward_event ()
+        | Some (xwayland:xwayland_hooks) ->
+          xwayland#on_keyboard_entry ~surface ~forward_event
+
+      method on_leave _ ~serial ~surface =
+        update_serial t serial;
+        C.Wl_keyboard.leave c ~serial ~surface:(to_client surface)
+
+      method on_key _ ~serial ~time ~key ~state =
+        update_serial t serial;
+        C.Wl_keyboard.key c ~serial ~time ~key ~state
+
+      method on_modifiers _ ~serial ~mods_depressed ~mods_latched ~mods_locked ~group =
+        update_serial t serial;
+        C.Wl_keyboard.modifiers c ~serial ~mods_depressed ~mods_latched ~mods_locked ~group
+
+      method on_repeat_info _ = C.Wl_keyboard.repeat_info (cv c)
+    end
+  in
+  Proxy.Handler.attach c @@ object
+    inherit [_] C.Wl_keyboard.v1
+    method on_release = delete_with H.Wl_keyboard.release h
+  end
+
 let make_seat ~xwayland t bind c =
   let c = Proxy.cast_version c in
   let cap_mask = C.Wl_seat.Capability.(Int32.logor keyboard pointer) in
@@ -604,31 +647,7 @@ let make_seat ~xwayland t bind c =
   Proxy.Handler.attach c @@ object
     inherit [_] C.Wl_seat.v1
     method! user_data = user_data
-    method on_get_keyboard _ keyboard =
-      let h : _ Proxy.t = H.Wl_seat.get_keyboard host @@ object
-          inherit [_] H.Wl_keyboard.v1
-          method on_keymap    _ ~format ~fd ~size =
-            C.Wl_keyboard.keymap keyboard ~format ~fd ~size;
-            Unix.close fd
-          method on_enter     _ ~serial ~surface = update_serial t serial; C.Wl_keyboard.enter keyboard ~serial ~surface:(to_client surface)
-          method on_leave     _ ~serial ~surface = update_serial t serial; C.Wl_keyboard.leave keyboard ~serial ~surface:(to_client surface)
-
-          method on_key       _ ~serial ~time ~key ~state =
-            update_serial t serial;
-            C.Wl_keyboard.key keyboard ~serial ~time ~key ~state
-
-          method on_modifiers _ ~serial ~mods_depressed ~mods_latched ~mods_locked ~group =
-            update_serial t serial;
-            C.Wl_keyboard.modifiers keyboard ~serial ~mods_depressed ~mods_latched ~mods_locked ~group
-
-          method on_repeat_info _ = C.Wl_keyboard.repeat_info (cv keyboard)
-        end
-      in
-      Proxy.Handler.attach keyboard @@ object
-        inherit [_] C.Wl_keyboard.v1
-        method on_release = delete_with H.Wl_keyboard.release h
-      end
-
+    method on_get_keyboard _ keyboard = make_keyboard ~xwayland t ~host_seat:host keyboard
     method on_get_pointer _ c = make_pointer ~xwayland t ~host_seat:host c
     method on_get_touch _ = Fmt.failwith "TODO: on_get_touch"
     method on_release = delete_with H.Wl_seat.release host

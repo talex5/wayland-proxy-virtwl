@@ -376,3 +376,39 @@ end
 
 let configure = ConfigureWindow.send Request.Unchecked
 let configure_checked = ConfigureWindow.send Request.Checked
+
+module SetInputFocus = struct
+  [%%cstruct
+    type req = {
+      focus : uint32_t;
+      time : uint32_t;
+    } [@@little_endian]
+  ]
+
+  let pp_focus f = function
+    | `None -> Fmt.string f "None"
+    | `PointerRoot -> Fmt.string f "PointerRoot"
+    | `Window x -> pp f x
+
+  let send_checked t ~revert_to ~time focus =
+    Log.info (fun f -> f "SetInputFocus %a" pp_focus focus);
+    let minor =
+      match revert_to with
+      | `None -> 0
+      | `PointerRoot -> 1
+      | `Parent -> 2
+    in
+    Request.send_checked t ~major:42 ~minor sizeof_req (fun r ->
+        set_req_focus r (match focus with
+            | `None -> 0l
+            | `PointerRoot -> 1l
+            | `Window x -> x
+          );
+        set_req_time r (match time with
+            | `CurrentTime -> 0l
+            | `Time time -> time
+          )
+      )
+end
+
+let set_input_focus_checked = SetInputFocus.send_checked

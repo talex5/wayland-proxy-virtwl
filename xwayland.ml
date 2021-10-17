@@ -66,6 +66,8 @@ type t = {
   of_host_surface : (int32, paired) Hashtbl.t;    (* Host-side Wayland ID -> details *) 
 
   mutable pointer_surface : paired option;        (* A member of [of_host_surface] *)
+  mutable keyboard_surface : paired option;       (* A member of [of_host_surface] *)
+  mutable last_event_surface : [`Keyboard | `Pointer];  (* Which to prefer *)
 
   (* This is set when Xwayland creates the xdg_wm_base. We need it to sync the two connections.
      Xwayland doesn't actually need this in rootless mode, but luckily for us it creates it anyway. *)
@@ -622,6 +624,11 @@ let init_popup t ~x11 ~xdg_surface ~info ~parent window =
   Xdg_positioner.destroy positioner;
   popup
 
+let last_event_surface t =
+  match t.last_event_surface with
+  | `Pointer -> t.pointer_surface
+  | `Keyboard -> t.keyboard_surface
+
 (* X window [window] corresponds to Wayland surface [host_surface].
    Create the window frame and add to [paired] and [of_host_surface].
    Note that [host_surface] may have already been destroyed by the time we get here. *)
@@ -646,7 +653,7 @@ let pair t ~set_configured ~host_surface window =
     let paired = { window; xdg_surface; geometry = info.geometry; xdg_role = `None } in
     Hashtbl.add t.paired window paired;
     Hashtbl.add t.of_host_surface (Wayland.Proxy.id host_surface) paired;
-    let fallback_parent = if parent = None then t.pointer_surface else parent in
+    let fallback_parent = if parent = None then last_event_surface t else parent in
     match info.window_type, fallback_parent with
     | (`Normal | `Dialog), _
     | _, None ->  (* (if we don't have a parent, then we must make it a top-level) *)
@@ -693,19 +700,31 @@ let unpair t ~host_surface paired =
   Xdg_surface.destroy paired.xdg_surface;
   Hashtbl.remove t.of_host_surface (Proxy.id host_surface);
   Hashtbl.remove t.paired paired.window;
-  match t.pointer_surface with
-  | Some p when p == paired -> t.pointer_surface <- None
-  | _ -> ()
+  begin match t.pointer_surface with
+    | Some p when p == paired ->
+      t.pointer_surface <- None;
+      t.last_event_surface <- `Keyboard
+    | _ -> ()
+  end;
+  begin match t.keyboard_surface with
+    | Some p when p == paired ->
+      t.keyboard_surface <- None;
+      t.last_event_surface <- `Pointer
+    | _ -> ()
+  end
 
-module Pointer = struct
+module Input = struct
   (* Before sending a pointer event to Xwayland, we must make sure that the window
      is at the top of the stack. The raise is sent over the X11 connection, so we
      need to wait to be sure it has arrived before sending any further Wayland
-     events. *)
+     events.
+
+     Similarly, we need to send SetInputFocus requests on keyboard focus. *)
 
   type nonrec t = {
     xwayland : t;
     mutable top_window : paired option;
+    mutable focus_window : paired option;
   }
 
   (* There is never more than one instance of this running at a time because
@@ -714,6 +733,8 @@ module Pointer = struct
     match t.top_window with
     | Some x when x.window = paired.window -> Lwt.return_unit            (* Already on top *)
     | _ ->
+      (* Ensure any previous pointer events (for the old surface) have been delivered: *)
+      let* () = t.xwayland.wayland_ping () in
       t.top_window <- None;
       (* let* () = Lwt_unix.sleep 2.0 in *)
       let+ e = X11.Window.configure_checked x11 paired.window ~stack_mode:`Above in
@@ -725,6 +746,26 @@ module Pointer = struct
            We're really just using "_check" to ensure we did a round-trip. *)
         Log.info (fun f -> f "Error raising window: %a" X11.Error.pp_code err)
 
+  (* There is never more than one instance of this running at a time because
+     events from the compositor are paused while it's running. *)
+  let ensure_focus ~x11 t paired =
+    match t.focus_window with
+    | Some x when x.window = paired.window -> Lwt.return_unit            (* Already has focus *)
+    | _ ->
+      (* Ensure any previous keyboard events (for the old surface) have been delivered: *)
+      let* () = t.xwayland.wayland_ping () in
+      t.focus_window <- None;
+      (* let* () = Lwt_unix.sleep 2.0 in *)
+      let+ e = X11.Window.set_input_focus_checked x11 (`Window paired.window)
+          ~revert_to:`PointerRoot ~time:`CurrentTime in
+      match e with
+      | Ok () ->
+        t.focus_window <- Some paired
+      | Error err ->
+        (* Probably the window got destroyed. That's fine. Xwayland should discard the events.
+           We're really just using "_check" to ensure we did a round-trip. *)
+        Log.info (fun f -> f "Error giving focus to window: %a" X11.Error.pp_code err)
+
   let surface_destroyed t paired =
     match t.top_window with
     | Some p when p == paired -> t.top_window <- None
@@ -734,12 +775,14 @@ module Pointer = struct
     {
       xwayland;
       top_window = None;
+      focus_window = None;
     }
 
   let on_pointer_entry t ~surface ~forward_event =
     (* Fmt.pr "Entry: %a@." Relay.dump t.xwayland.relay; *)
     let paired = Hashtbl.find_opt t.xwayland.of_host_surface (Proxy.id surface) in
     t.xwayland.pointer_surface <- paired;
+    t.xwayland.last_event_surface <- `Pointer;
     match paired with
     | None ->
       Log.warn (fun f -> f "Pointer entered unknown surface %a" Proxy.pp surface);
@@ -748,14 +791,34 @@ module Pointer = struct
       Log.info (fun f -> f "Pausing to raise X11 window");
       Relay.set_from_host_paused t.xwayland.relay true;
       Lwt.async (fun () ->
-          (* Ensure any previous pointer events (for the old surface) have been delivered: *)
-          let* () = t.xwayland.wayland_ping () in
           let* x11 = t.xwayland.x11 in
           (* Raise the target X11 window so that it will get the following events: *)
           let* () = ensure_topmost ~x11 t paired in
           (* Now resume event delivery, starting with the delayed pointer enter event: *)
           forward_event ();
           Log.info (fun f -> f "Window raised; unpausing");
+          Relay.set_from_host_paused t.xwayland.relay false;
+          Lwt.return_unit
+        )
+
+  let on_keyboard_entry t ~surface ~forward_event =
+    let paired = Hashtbl.find_opt t.xwayland.of_host_surface (Proxy.id surface) in
+    t.xwayland.keyboard_surface <- paired;
+    t.xwayland.last_event_surface <- `Keyboard;
+    match paired with
+    | None ->
+      Log.warn (fun f -> f "Keyboard entered unknown surface %a" Proxy.pp surface);
+      forward_event ()
+    | Some paired ->
+      Log.info (fun f -> f "Pausing to focus X11 window");
+      Relay.set_from_host_paused t.xwayland.relay true;
+      Lwt.async (fun () ->
+          let* x11 = t.xwayland.x11 in
+          (* Focus the target X11 window so that it will get the following events: *)
+          let* () = ensure_focus ~x11 t paired in
+          (* Now resume event delivery, starting with the delayed keyboard enter event: *)
+          forward_event ();
+          Log.info (fun f -> f "Window has focus; unpausing");
           Relay.set_from_host_paused t.xwayland.relay false;
           Lwt.return_unit
         )
@@ -939,11 +1002,14 @@ let handle_xwayland ~config ~local_wayland ~local_wm_socket =
     paired = Hashtbl.create 5;
     of_host_surface = Hashtbl.create 5;
     pointer_surface = None;
+    keyboard_surface = None;
+    last_event_surface = `Keyboard;
     wayland_ping = no_wayland_ping;
   } in
-  let pointer = Pointer.make t in
+  let input = Input.make t in
   let xwayland = object (_ : Relay.xwayland_hooks)
-    method on_pointer_entry = Pointer.on_pointer_entry pointer
+    method on_pointer_entry = Input.on_pointer_entry input
+    method on_keyboard_entry = Input.on_keyboard_entry input
 
     method on_create_surface host_surface client_surface ~set_configured =
       Log.info (fun f -> f "%a created by Xwayland (host=%a)"
@@ -970,7 +1036,7 @@ let handle_xwayland ~config ~local_wayland ~local_wm_socket =
       match Hashtbl.find_opt t.of_host_surface (Proxy.id host_surface) with
       | None -> ()      (* If it's still in [unpaired], another thread will remove it later. *)
       | Some paired ->
-        Pointer.surface_destroyed pointer paired;
+        Input.surface_destroyed input paired;
         unpair t ~host_surface paired
 
     method set_ping fn =
