@@ -638,7 +638,7 @@ let pair t ~set_configured ~host_surface window =
     let xdg_surface = Xdg_wm_base.get_xdg_surface t.wm_base ~surface:host_surface @@ object
         inherit [_] Xdg_surface.v1
         method on_configure proxy ~serial =
-          Xdg_surface.ack_configure proxy ~serial;
+          if Proxy.can_send proxy then Xdg_surface.ack_configure proxy ~serial;
           set_configured (
             if info.window_type = `Normal && info.win_attrs.override_redirect then `Hide else `Show
           )
