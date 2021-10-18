@@ -33,7 +33,7 @@ let is_listening path =
     Log.warn (fun f -> f "Error testing socket %S: %a" path Fmt.exn ex);
     false
 
-(* Start listening for connections to [wayland_display] and set $WAYLAND_DISPLAY. *)
+(* Start listening for connections to [wayland_display]. *)
 let listen_wayland ~config wayland_display = 
   let socket_path = Wayland.Unix_transport.socket_path ~wayland_display () in
   let existing_socket = Sys.file_exists socket_path in
@@ -47,7 +47,6 @@ let listen_wayland ~config wayland_display =
     Unix.listen listening_socket 5;
     Log.info (fun f -> f "Listening on %S for Wayland clients" socket_path);
     Lwt.async (fun () -> listen ~config (Lwt_unix.of_unix_file_descr listening_socket));
-    Unix.putenv "WAYLAND_DISPLAY" wayland_display;
     Lwt.return (`Ok ())
   )
 
@@ -65,6 +64,10 @@ let listen_x11 ~config x_display =
   Lwt.async (fun () -> Xwayland.listen ~config ~display:x_display (Lwt_unix.of_unix_file_descr xwayland_listening_socket));
   Unix.putenv "DISPLAY" (Printf.sprintf ":%d" x_display)
 
+let env_replace k v l =
+  let prefix = k ^ "=" in
+  (prefix ^ v) :: List.filter (fun x -> not (Config.starts_with ~prefix x)) l
+
 let main setup_tracing wayland_display x_display config args =
   Lwt_main.run begin
     let* () = setup_tracing ~wayland_display in
@@ -77,7 +80,13 @@ let main setup_tracing wayland_display x_display config args =
     | [] ->
       fst (Lwt.wait ())
     | args ->
-      let child = Lwt_process.open_process ("", Array.of_list args) in
+      let env =
+        Unix.environment ()
+        |> Array.to_list
+        |> env_replace "WAYLAND_DISPLAY" wayland_display
+        |> Array.of_list
+      in
+      let child = Lwt_process.open_process_none ("", Array.of_list args) ~env in
       let* status = child#status in
       Log.info (fun f -> f "Application process ended (%a)" Trace.pp_status status);
       Lwt.return (`Ok ())

@@ -9,6 +9,8 @@
 open Lwt.Syntax
 open Wayland
 
+let virtwl_dev = "/dev/wl0"
+
 (* Since we're just relaying messages, we mostly don't care about checking version compatibility.
    e.g. if a client sends us a v5 message, then we can assume the corresponding server object
    supports v5 too (otherwise the client shouldn't have sent it).
@@ -65,10 +67,12 @@ let point_to_client ~xwayland (x, y) =
       Fixed.of_bits (Int32.mul (Fixed.to_bits y) scale)
     )
 
+type transport = < S.transport; close:unit Lwt.t >
+
 type t = {
   config : Config.t;
-  virtwl : Wayland_virtwl.t;
-  host_transport : < S.transport; close:unit Lwt.t >;
+  virtwl : Wayland_virtwl.t option;
+  host_transport : transport;
   host_closed : (unit, exn) Lwt_result.t;
   host_display : Client.t;
   host_registry : Wayland.Registry.t;
@@ -91,11 +95,16 @@ end
 (* Data attached to client objects (e.g. the corresponding host object).
    Host and client versions are assumed to match. *)
 module CD = struct
-  type 'v buffer = {
+  type 'v virtwl_buffer = {
     host_buffer : 'v H.Wl_buffer.t;
     host_memory : Cstruct.t;
     client_memory : Cstruct.t;
   }
+
+  type 'v buffer = [
+    | `Virtwl of 'v virtwl_buffer Lazy.t
+    | `Direct of 'v H.Wl_buffer.t
+  ]
 
   type surface_state =
     | Ready
@@ -112,7 +121,7 @@ module CD = struct
   type 'a t = 
     | Region           : 'v H.Wl_region.t                       -> [`Wl_region]                       t
     | Surface          : 'v surface                             -> [`Wl_surface]                      t
-    | Buffer           : 'v buffer Lazy.t                       -> [`Wl_buffer]                       t
+    | Buffer           : 'v buffer                              -> [`Wl_buffer]                       t
     | Seat             : 'v H.Wl_seat.t                         -> [`Wl_seat]                         t
     | Output           : 'v H.Wl_output.t                       -> [`Wl_output]                       t
     | Toplevel         : 'v H.Xdg_toplevel.t                    -> [`Xdg_toplevel]                    t
@@ -166,7 +175,8 @@ let to_host (type a) (c : (a, 'v, [`Server]) Proxy.t) : (a, 'v, [`Client]) Proxy
   | Xdg_positioner x -> cv x
   | Data_source x -> cv x
   | Zwp_source x -> cv x
-  | Buffer x -> cv (Lazy.force x).host_buffer
+  | Buffer (`Virtwl x) -> cv (Lazy.force x).host_buffer
+  | Buffer (`Direct x) -> cv x
   | Gtk_source _ ->
     (* Here, a client Gtk corresponds to a host Zwp, so the types aren't right. *)
     failwith "Can't use to_host with GTK translation"
@@ -175,7 +185,7 @@ let to_host (type a) (c : (a, 'v, [`Server]) Proxy.t) : (a, 'v, [`Client]) Proxy
    This means the client sees events in the usual order, and means we can continue forwarding
    any events the host sends before hearing about the deletion. *)
 let delete_with fn host client =
-  Proxy.on_delete host (fun () -> Proxy.delete client);
+  Proxy.on_delete host (fun () -> if Proxy.transport_up client then Proxy.delete client);
   fn host
 
 let make_region ~host_region r =
@@ -209,7 +219,7 @@ module Shm : sig
 
   val create :
     host_shm:[`V1] H.Wl_shm.t ->
-    virtwl:Unix.file_descr ->
+    virtwl:Wayland_virtwl.t ->
     client_fd:Unix.file_descr ->
     size:int32 ->
     [`V1] C.Wl_shm_pool.t ->
@@ -237,10 +247,10 @@ module Shm : sig
   val destroy_buffer : buffer -> unit
   (** [destroy_buffer b] destroys the host buffer (if any), and notifies the client proxy of the deletion. *)
 
-  val user_data : buffer -> [`V1] CD.buffer Lazy.t
+  val user_data : buffer -> [`V1] CD.buffer
   (** [user_data b] is some data to attach to the client proxy so the surface can find it. *)
 
-  val map_buffer : 'v CD.buffer Lazy.t -> 'v CD.buffer
+  val map_buffer : 'v CD.virtwl_buffer Lazy.t -> 'v CD.virtwl_buffer
   (** [map_buffer user_data] is used by the surface when attaching the buffer. *)
 end = struct
   type mapping = {
@@ -282,15 +292,16 @@ end = struct
       m
 
   type buffer = {
-    data : [`V1] CD.buffer Lazy.t;      (* Forced when buffer is attached to a surface *)
-    on_destroy : unit Lazy.t;           (* Forced when client buffer proxy is destroyed *)
+    data : [`V1] CD.virtwl_buffer Lazy.t;      (* Forced when buffer is attached to a surface *)
+    on_destroy : unit Lazy.t;                  (* Forced when client buffer proxy is destroyed *)
   }
 
-  let user_data b = b.data
+  let user_data b : _ CD.buffer = `Virtwl b.data
 
   let clear_mapping t =
     t.mapping |> Option.iter (fun m ->
-        H.Wl_shm_pool.destroy m.host_pool;
+        if Proxy.transport_up m.host_pool then
+          H.Wl_shm_pool.destroy m.host_pool;
         t.mapping <- None
       )
 
@@ -341,7 +352,7 @@ end = struct
     { on_destroy; data }
 
   (* Client-side buffer proxy must still exist when this is called. *)
-  let map_buffer : _ -> _ CD.buffer = Lazy.force
+  let map_buffer : _ -> _ CD.virtwl_buffer = Lazy.force
 
   let destroy_buffer b =
     Lazy.force b.on_destroy
@@ -391,10 +402,16 @@ let make_surface ~xwayland ~host_surface c =
       match buffer with
       | Some buffer when !state <> `Hide ->
         let Client_data (Buffer buffer) = user_data buffer in
-        let buffer = Shm.map_buffer buffer in
-        data.host_memory <- buffer.host_memory;
-        data.client_memory <- buffer.client_memory;
-        H.Wl_surface.attach h ~buffer:(Some buffer.host_buffer) ~x ~y
+        let host_buffer =
+          match buffer with
+          | `Direct host_buffer -> host_buffer
+          | `Virtwl buffer ->
+            let buffer = Shm.map_buffer buffer in
+            data.host_memory <- buffer.host_memory;
+            data.client_memory <- buffer.client_memory;
+            buffer.host_buffer
+        in
+        H.Wl_surface.attach h ~buffer:(Some host_buffer) ~x ~y
       | _ ->
         data.host_memory <- Cstruct.empty;
         data.client_memory <- Cstruct.empty;
@@ -513,7 +530,7 @@ let make_buffer b proxy =
 
 (* todo: this all needs to be more robust.
    Also, sealing? *)
-let make_shm_pool ~virtwl ~host_shm proxy ~fd:client_fd ~size:orig_size =
+let make_shm_pool_virtwl ~virtwl ~host_shm proxy ~fd:client_fd ~size:orig_size =
   let mapping = Shm.create ~host_shm ~virtwl ~client_fd ~size:orig_size proxy in
   Proxy.Handler.attach proxy @@ object
     inherit [_] C.Wl_shm_pool.v1
@@ -525,6 +542,27 @@ let make_shm_pool ~virtwl ~host_shm proxy ~fd:client_fd ~size:orig_size =
     method on_destroy t = Proxy.delete t
 
     method on_resize _ ~size = Shm.resize mapping size
+  end
+
+let make_shm_pool_direct host_pool proxy =
+  Proxy.Handler.attach proxy @@ object
+    inherit [_] C.Wl_shm_pool.v1
+
+    method on_create_buffer _ buffer ~offset ~width ~height ~stride ~format =
+      let host_buffer = H.Wl_shm_pool.create_buffer host_pool ~offset ~width ~height ~stride ~format @@ object
+          inherit [_] H.Wl_buffer.v1
+          method on_release _ = C.Wl_buffer.release buffer
+        end
+      in
+      Proxy.Handler.attach buffer @@ object
+        inherit [_] C.Wl_buffer.v1
+        method! user_data = client_data (Buffer (`Direct host_buffer))
+        method on_destroy = delete_with H.Wl_buffer.destroy host_buffer
+      end
+
+    method on_destroy _ = H.Wl_shm_pool.destroy host_pool
+
+    method on_resize _ = H.Wl_shm_pool.resize host_pool
   end
 
 let make_output ~xwayland bind c =
@@ -669,7 +707,13 @@ let make_shm ~virtwl bind c =
   in
   Proxy.Handler.attach c @@ object
     inherit [_] C.Wl_shm.v1
-    method on_create_pool _ = make_shm_pool ~virtwl ~host_shm:h
+    method on_create_pool _ proxy ~fd ~size =
+      match virtwl with
+      | Some virtwl -> make_shm_pool_virtwl ~virtwl ~host_shm:h proxy ~fd ~size
+      | None ->
+        let host_pool = H.Wl_shm.create_pool h ~fd ~size @@ new H.Wl_shm_pool.v1 in
+        Unix.close fd;
+        make_shm_pool_direct host_pool proxy
   end
 
 let make_popup ~host_popup c =
@@ -1169,10 +1213,19 @@ let make_registry ~xwayland t reg =
       C.Wl_registry.global reg ~name:(Int32.of_int name) ~interface:M.interface ~version
     )
 
-let create config =
-  let fd = Unix.(openfile "/dev/wl0" [O_RDWR; O_CLOEXEC] 0x600) in
-  let virtwl = Wayland_virtwl.of_fd fd in
-  let host_transport = Wayland_virtwl.new_context virtwl in
+let create (config : Config.t) =
+  let* (host_transport, virtwl) =
+    match Sys.getenv_opt "WAYLAND_DISPLAY" with
+    | (None | Some "") when Sys.file_exists virtwl_dev ->
+      Log.info (fun f -> f "Connecting to %S" virtwl_dev);
+      let fd = Unix.(openfile virtwl_dev [O_RDWR; O_CLOEXEC] 0x600) in
+      let virtwl = Wayland_virtwl.of_fd fd in
+      let host_transport = Wayland_virtwl.new_context virtwl in
+      Lwt.return ((host_transport :> transport), Some virtwl)
+    | _ ->
+      let+ host_transport = Wayland.Unix_transport.connect () in
+      (host_transport :> transport), None
+  in
   let host_display, host_closed = Wayland.Client.connect ~trace:(module Trace.Host) host_transport in
   let* host_registry = Wayland.Registry.of_display host_display in
   Lwt.return {
@@ -1207,21 +1260,22 @@ let accept ?xwayland t client =
     let* r = Server.closed s in
     if !is_active then (
       Log.info (fun f -> f "Client %a" pp_closed r);
-      is_active := false
-    );
-    t.host_transport#close
+      is_active := false;
+      t.host_transport#shutdown
+    ) else Lwt.return_unit
   in
   let host_done =
     let* r = t.host_closed in
     if !is_active then (
       Log.info (fun f -> f "Host %a" pp_closed r);
-      is_active := false
-    );
-    Lwt_unix.shutdown client Unix.SHUTDOWN_SEND;
-    Lwt.return_unit
+      is_active := false;
+      client_transport#shutdown
+    ) else Lwt.return_unit
   in
   let* () = Lwt.choose [client_done; host_done] in
-  Unix.close t.virtwl;
+  let* () = t.host_transport#close
+  and* () = client_transport#close
+  in
   Lwt.return_unit
 
 let registry t = t.host_registry
