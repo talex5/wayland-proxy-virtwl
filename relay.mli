@@ -1,7 +1,7 @@
 type xwayland_hooks = <
   on_create_surface :
     'v. ([< `V1 | `V2 | `V3 | `V4 ] as 'v) H.Wl_surface.t -> 'v C.Wl_surface.t ->
-    set_configured:([`Show | `Hide] -> unit) ->
+    set_configured:([`Show | `Hide | `Unmanaged] -> unit) ->
     unit;
   (** Called when a new client wl_surface is created, along with the new host surface.
       Delivery of requests to the host surface is paused at this point; call [set_configured] to release the queue.

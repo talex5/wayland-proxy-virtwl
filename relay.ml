@@ -18,7 +18,7 @@ let cv = Proxy.cast_version
 type xwayland_hooks = <
   on_create_surface :
     'v. ([< `V1 | `V2 | `V3 | `V4 ] as 'v) H.Wl_surface.t -> 'v C.Wl_surface.t ->
-    set_configured:([`Show | `Hide] -> unit) ->
+    set_configured:([`Show | `Hide | `Unmanaged] -> unit) ->
     unit;
 
   on_destroy_surface :
@@ -389,7 +389,7 @@ let make_surface ~xwayland ~host_surface c =
       let (x, y) = scale_to_host ~xwayland (x, y) in
       when_configured @@ fun () ->
       match buffer with
-      | Some buffer when !state = `Show ->
+      | Some buffer when !state <> `Hide ->
         let Client_data (Buffer buffer) = user_data buffer in
         let buffer = Shm.map_buffer buffer in
         data.host_memory <- buffer.host_memory;
@@ -449,6 +449,13 @@ let make_surface ~xwayland ~host_surface c =
       if x#scale <> 1l then
         H.Wl_surface.set_buffer_scale h ~scale:x#scale;       (* Xwayland will be a new enough version *)
       let set_configured s =
+        if s = `Unmanaged then (
+          (* For pointer cursors we want them at the normal size, even if low-res.
+             Also, Vim tries to hide the pointer by setting a 1x1 cursor, which confuses things
+             when unscaled. Ideally we would stop doing transforms in this case, but it doesn't
+             seem to matter. *)
+          H.Wl_surface.set_buffer_scale h ~scale:1l;
+        );
         state := s;
         match data.state with
         | Ready | Destroyed -> ()
@@ -586,7 +593,7 @@ let make_pointer t ~xwayland ~host_seat c =
     inherit [_] C.Wl_pointer.v1
 
     method on_set_cursor _ ~serial ~surface ~hotspot_x ~hotspot_y =
-      let (hotspot_x, hotspot_y) = scale_to_host ~xwayland (hotspot_x, hotspot_y) in
+      (* Cursors are not unscaled, so no need to transform here. *)
       H.Wl_pointer.set_cursor h ~serial ~surface:(Option.map to_host surface) ~hotspot_x ~hotspot_y
 
     method on_release t =

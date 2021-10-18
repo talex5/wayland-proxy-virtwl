@@ -29,7 +29,7 @@ type client_surface = [`V1 | `V2 | `V3 | `V4 ] Wayland.Wayland_server.Wl_surface
 type unpaired = {
   client_surface : client_surface;
   host_surface : host_surface;
-  set_configured : [`Show | `Hide] -> unit;
+  set_configured : [`Show | `Hide | `Unmanaged] -> unit;
 }
 
 type paired = {
@@ -1027,7 +1027,7 @@ let handle_xwayland ~config ~local_wayland ~local_wm_socket =
           if Hashtbl.mem t.unpaired client_surface_id then (
             Log.info (fun f -> f "%a doesn't correspond to an X11 window" Proxy.pp client_surface);
             Hashtbl.remove t.unpaired client_surface_id;
-            set_configured `Show
+            set_configured `Unmanaged
           );
           Lwt.return_unit
         )
