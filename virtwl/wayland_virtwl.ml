@@ -12,6 +12,8 @@ external virtwl_map_file : Unix.file_descr -> ('a, 'b) Stdlib.Bigarray.kind -> i
 let of_context_fd fd : #Wayland.S.transport =
   let fd = Lwt_unix.of_unix_file_descr ~blocking:false fd in
   object
+    val mutable up = true
+
     method send data fds =
       let { Cstruct.buffer; off; len } = data in
       virtwl_send (Lwt_unix.unix_file_descr fd) buffer off len fds;
@@ -20,11 +22,20 @@ let of_context_fd fd : #Wayland.S.transport =
     method recv { Cstruct.buffer; off; len } =
       Lwt_unix.(wrap_syscall Read) fd (fun () ->
           assert (len > 0);             (* Or Linux panics *)
-          virtwl_recv (Lwt_unix.unix_file_descr fd) buffer off len
+          let (got, fds) = virtwl_recv (Lwt_unix.unix_file_descr fd) buffer off len in
+          if got = 0 then up <- false;
+          (got, fds)
         )
 
-    (* The ioctl interface doesn't seem to have shutdown. *)
+    (* The ioctl interface doesn't seem to have shutdown, so try close instead: *)
+    method shutdown =
+      up <- false;
+      Lwt_unix.close fd
+
+    method up = up
+
     method close =
+      up <- false;
       Lwt_unix.close fd
 
   method pp f = Fmt.string f "virtwl"

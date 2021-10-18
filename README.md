@@ -1,20 +1,23 @@
-# A virtwl Wayland proxy for VMs
+# A Wayland proxy
 
-`wayland-proxy-virtwl` runs inside a VM, offering a Wayland socket to applications.
-It proxies all requests to the host Wayland compositor using the virtwl Linux module.
-See https://alyssa.is/using-virtio-wl/ for some background.
+`wayland-proxy-virtwl` accepts Wayland connections from client applications and proxies the messages to a host compositor.
+Features:
 
-Since regular guest memory cannot be shared with the host, it allocates a shadow buffer from the host and copies the frame data into that.
-Wayland can also use graphics memory directly, which should avoid the copy, but this is not yet supported.
+- It can act as an X11 window manager, allowing Xwayland to work without needing support in the host compositor.
 
-It can also be used to make changes to the protocol messages.
-e.g. using `--tag` will add a prefix to window titles.
+- It can run inside a VM, using the `virtwl` Linux kernel module to proxy to the host's compositor.
+  This allows applications running in VMs to be used as if they were running on the host.
+
+- It can also be used to make changes to protocol messages.
+  e.g. using `--tag` will add a prefix to window titles.
 
 It is similar to the [sommelier][] proxy from ChromiumOS, but written in OCaml.
 It adds support for the primary selection, and aims to be easier to modify and less segfaulty.
 It uses the [ocaml-wayland][] library.
 
 It is able to proxy Evince and Firefox at least, and also works with Xwayland well enough to run gvim.
+
+See [Qubes-lite With KVM and Wayland](https://roscidus.com/blog/blog/2021/03/07/qubes-lite-with-kvm-and-wayland/) for a setup using this.
 
 ## Installation
 
@@ -40,6 +43,14 @@ ExecStart=/path/to/wayland-proxy-virtwl --tag="[my-vm] " --wayland-display wayla
 WantedBy=default.target
 ```
 
+## virtwl support
+
+If `$WAYLAND_DISPLAY` is not set and `/dev/wl0` is present, the proxy will use that to connect to the host's compositor.
+Since regular guest memory cannot be shared with the host, it allocates a shadow buffer from the host and copies the frame data into that.
+Wayland can also use graphics memory directly, which should avoid the copy, but this is not yet supported.
+
+See https://alyssa.is/using-virtio-wl/ for some background.
+
 ## Xwayland support
 
 If you run with `--x-display=0` then it listens on the abstract socket `@/tmp/.X11-unix/X0` for X11 clients.
@@ -57,12 +68,12 @@ This is rather complicated. The following features mostly work:
 - The PRIMARY and CLIPBOARD selections are connected to the corresponding Wayland APIs.
 - Pointer and keyboard events work.
 
-You can use the `--xrdb 'KEY:VALUE'` option to set default settings in the xrdb database.
-For example, `--xrdb Xft.dpi:150` is useful on high-DPI screens.
-
 Xwayland doesn't support Wayland's HiDPI feature, which causes the compositor to double everything in size,
 which is often blurry and unusable. To fix this, use e.g. `--x-unscale=2` to reverse this transformation
 (and then just configure the X11 apps to use a larger font).
+
+You can use the `--xrdb 'KEY:VALUE'` option to set default settings in the xrdb database.
+For example, `--xrdb Xft.dpi:150` is useful on high-DPI screens.
 
 Limitations:
 

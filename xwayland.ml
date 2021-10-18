@@ -59,7 +59,7 @@ type t = {
   x11 : X11.Display.t Lwt.t;
   config : Config.t;
   wm_base : [`V1] Xdg_wm_base.t;
-  decor_mgr : [`V1] Xdg_decor_mgr.t;
+  decor_mgr : [`V1] Xdg_decor_mgr.t option;
   unpaired : (int32, unpaired) Hashtbl.t;         (* Client-side Wayland ID -> details *)
   unpaired_added : unit Lwt_condition.t;          (* Fires when [unpaired] gets a new entry. *)
   paired : (X11.Window.t, paired) Hashtbl.t;      (* X11 ID -> details *)
@@ -135,7 +135,7 @@ module Selection = struct
     set_selection_window : X11.Window.t Lwt.u;
     clipboard_window : X11.Window.t Lwt.t;
     set_clipboard_window : X11.Window.t Lwt.u;
-    virtwl : Wayland_virtwl.t;
+    virtwl : Wayland_virtwl.t option;
     relay : Relay.t;
 
     (* When we request an X11 selection, we add the callback for the response here. *)
@@ -199,10 +199,6 @@ module Selection = struct
       Log.warn (fun f -> f "No targets attached to %a!" Proxy.pp offer);
       []
 
-  let starts_with ~prefix x =
-    String.length x >= String.length prefix &&
-    String.sub x 0 (String.length prefix) = prefix
-
   (** An X application has requested [target]. The Wayland provider is offering [targets].
       Return the MIME type and X11 target to use.
       For example, if xterm asks for target TEXT then we might reply with (text/plain, UTF8_STRING). *)
@@ -214,7 +210,7 @@ module Selection = struct
         List.find_map (fun mime_type ->
             match mime_type with
             | "text/plain" -> Some (mime_type, "UTF8_STRING")
-            | x when starts_with ~prefix:"text/plain;" x -> Some (mime_type, "UTF8_STRING")
+            | x when Config.starts_with ~prefix:"text/plain;" x -> Some (mime_type, "UTF8_STRING")
             | _ -> None
           ) targets
         |> Option.value ~default:(target, target)
@@ -244,11 +240,21 @@ module Selection = struct
         | Some (receive, targets) ->
           let* mime_type, reply_target = X11.Atom.get_name x11 target >|= mime_type_of_target ~targets in
           if List.mem mime_type targets then (
-            let host_fd = Wayland_virtwl.pipe_read t.virtwl in
-            let r = Lwt_io.(of_unix_fd ~mode:input) host_fd in    (* Will close [host_fd] *)
+            let host_fd, need_close_host, r =
+              match t.virtwl with
+              | Some virtwl ->
+                let host_fd = Wayland_virtwl.pipe_read virtwl in
+                let r = Lwt_io.(of_unix_fd ~mode:input) host_fd in    (* Will close [host_fd] *)
+                (host_fd, false, r)
+              | None ->
+                let r, w = Unix.pipe () in
+                let r = Lwt_io.(of_unix_fd ~mode:input) r in    (* Will close [r] *)
+                (w, true, r)
+            in
             Lwt.try_bind
               (fun () ->
                  receive ~mime_type ~fd:host_fd;        (* Tell Wayland app to write to [host_fd]. *)
+                 if need_close_host then Unix.close host_fd;
                  Lwt_io.read r
               )
               (fun data ->
@@ -577,12 +583,14 @@ let init_toplevel t ~x11 ~xdg_surface ~info window =
           )
     end
   in
-  let decor = Xdg_decor_mgr.get_toplevel_decoration t.decor_mgr ~toplevel @@ object
-      inherit [_] Xdg_decoration.v1
-      method on_configure _ ~mode:_ = ()
-    end
-  in
-  Xdg_decoration.set_mode decor ~mode:Xdg_decoration.Mode.Server_side;
+  t.decor_mgr |> Option.iter (fun decor_mgr ->
+      let decor = Xdg_decor_mgr.get_toplevel_decoration decor_mgr ~toplevel @@ object
+          inherit [_] Xdg_decoration.v1
+          method on_configure _ ~mode:_ = ()
+        end
+      in
+      Xdg_decoration.set_mode decor ~mode:Xdg_decoration.Mode.Server_side;
+    );
   Xdg_toplevel.set_title toplevel ~title:(t.config.tag ^ info.title);
   X11.Icccm.Wm_normal_hints.min_size info.wm_normal_hints |> Option.iter (fun (width, height) ->
       let scale = Int32.of_int t.config.xunscale in
@@ -989,7 +997,12 @@ let handle_xwayland ~config ~local_wayland ~local_wm_socket =
       method on_capabilities _ ~capabilities:_ = ()
     end
   in
-  let decor_mgr = Wayland.Registry.bind registry @@ new Xdg_decor_mgr.v1 in
+  let decor_mgr =
+    try Some (Wayland.Registry.bind registry @@ new Xdg_decor_mgr.v1)
+    with ex ->
+      Log.warn (fun f -> f "Can't get decoration manager: %a" Fmt.exn ex);
+      None
+  in
   let selection = Selection.create ~seat ~x11 ~virtwl ~registry ~relay in
   let t = {
     relay;
@@ -1079,7 +1092,14 @@ let spawn_and_run_xwayland ~config ~display listen_socket =
       (fun () ->
          let* () = Lwt_unix.close remote_wm_socket in
          let* () = Lwt_unix.close remote_wayland in
-         handle_xwayland ~config ~local_wayland ~local_wm_socket
+         Lwt.catch
+           (fun () ->
+             handle_xwayland ~config ~local_wayland ~local_wm_socket
+           )
+           (fun ex ->
+              Log.warn (fun f -> f "X11 WM failed: %a" Fmt.exn ex);
+              Lwt.return_unit
+           )
       )
       (fun () ->
          let* (_, status) = Lwt_unix.waitpid [] xwayland_pid in

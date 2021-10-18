@@ -40,3 +40,8 @@ let make_config tag xwayland_binary xrdb xunscale =
 
 let cmdliner =
   Term.(const make_config $ tag $ xwayland_binary $ xrdb $ xunscale)
+
+(* Just until NixOS has OCaml 4.13 *)
+let starts_with ~prefix x =
+  String.length x >= String.length prefix &&
+  String.sub x 0 (String.length prefix) = prefix

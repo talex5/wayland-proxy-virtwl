@@ -43,7 +43,9 @@ val accept : ?xwayland:xwayland_hooks -> t -> Lwt_unix.file_descr -> unit Lwt.t
 
 val registry : t -> Wayland.Registry.t
 
-val virtwl : t -> Wayland_virtwl.t
+val virtwl : t -> Wayland_virtwl.t option
+(** [virtwl t] is the virtwl connection, if any.
+    If [None], we have a normal connection to the host compositor, and can shared FDs directly. *)
 
 val update_serial : t -> int32 -> unit
 (** [update_serial t serial] sets [serial] as the last known serial number from the host. *)
