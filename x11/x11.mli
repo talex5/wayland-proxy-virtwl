@@ -179,6 +179,13 @@ module Window : sig
     Display.t -> t ->
     (unit, Error.code) result Lwt.t
   (** Like {!configure}, but waits for the server to confirm that it worked. *)
+
+  val set_input_focus_checked :
+    Display.t ->
+    revert_to:[< `None | `PointerRoot | `Parent] ->
+    time:[< `CurrentTime | `Time of Display.timestamp ] ->
+    [< `Window of t | `PointerRoot | `None] ->
+    (unit, Error.code) result Lwt.t
 end
 
 module Selection : sig
