@@ -180,6 +180,16 @@ module Window : sig
     (unit, Error.code) result Lwt.t
   (** Like {!configure}, but waits for the server to confirm that it worked. *)
 
+  val configure_notify :
+    Display.t ->
+    event:t ->
+    window:t ->
+    above_sibling:t option ->
+    geometry:Geometry.t ->
+    border_width:int ->
+    override_redirect:bool ->
+    unit Lwt.t
+
   val set_input_focus_checked :
     Display.t ->
     revert_to:[< `None | `PointerRoot | `Parent] ->

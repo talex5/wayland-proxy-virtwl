@@ -40,11 +40,12 @@ type paired = {
     | `Popup of [`V1] Xdg_popup.t
     | `None
   ];
-  geometry : X11.Geometry.t;
+  mutable geometry : X11.Geometry.t;
+  override_redirect : bool;
 }
 
-let pp_paired f { window; xdg_surface; xdg_role; geometry } =
-  Fmt.pf f "%a@%a/%t=%a"
+let pp_paired f { window; xdg_surface; xdg_role; geometry; override_redirect } =
+  Fmt.pf f "%a@%a/%t=%a%s"
     Proxy.pp xdg_surface
     X11.Geometry.pp geometry
     (fun f -> match xdg_role with
@@ -53,6 +54,7 @@ let pp_paired f { window; xdg_surface; xdg_role; geometry } =
        | `None -> Fmt.string f "(no role)"
     )
     X11.Xid.pp window
+    (if override_redirect then "(override-redirect)" else "")
 
 type t = {
   relay : Relay.t;
@@ -551,7 +553,7 @@ let examine_window t window : window_info Lwt.t =
   }
 
 (* Set the toplevel role for an xdg_surface. *)
-let init_toplevel t ~x11 ~xdg_surface ~info window =
+let init_toplevel t ~x11 ~xdg_surface ~info ~paired window =
   let toplevel = Xdg_surface.get_toplevel xdg_surface @@ object
       inherit [_] Xdg_toplevel.v1
 
@@ -561,6 +563,7 @@ let init_toplevel t ~x11 ~xdg_surface ~info window =
         if width > 0 && height > 0 then (
           Lwt.async (fun () ->
               let (width, height) = scale_to_client t (width, height) in
+              (paired:paired).geometry <- { paired.geometry with width; height };
               X11.Window.configure x11 window ~width ~height ~border_width:0
             )
         )
@@ -601,7 +604,7 @@ let init_toplevel t ~x11 ~xdg_surface ~info window =
   toplevel
 
 (* Set the popup role for an xdg_surface. *)
-let init_popup t ~x11 ~xdg_surface ~info ~parent window =
+let init_popup t ~x11 ~xdg_surface ~info ~parent ~paired window =
   let positioner = Xdg_wm_base.create_positioner t.wm_base @@ new Xdg_positioner.v1 in
   let geometry = info.geometry in
   Log.debug (fun f -> f "Parent geom: %a" X11.Geometry.pp (parent:paired).geometry);
@@ -623,7 +626,10 @@ let init_popup t ~x11 ~xdg_surface ~info ~parent window =
            This may violate the Wayland spec if unscaling is being used, but Sway allows it and it looks much better. *)
         if width > 0 && height > 0 && not info.win_attrs.override_redirect then (
           let (width, height) = scale_to_client t (width, height) in
-          Lwt.async (fun () -> X11.Window.configure x11 window ~width ~height ~border_width:0)
+          Lwt.async (fun () ->
+              (paired:paired).geometry <- { paired.geometry with width; height };
+              X11.Window.configure x11 window ~width ~height ~border_width:0
+            )
         )
       method on_popup_done _ = ()               (* todo: maybe notify the X application about this? *)
       method on_repositioned _ ~token:_ = ()
@@ -658,7 +664,13 @@ let pair t ~set_configured ~host_surface window =
             if info.window_type = `Normal && info.win_attrs.override_redirect then `Hide else `Show
           )
       end in
-    let paired = { window; xdg_surface; geometry = info.geometry; xdg_role = `None } in
+    let paired = {
+      window;
+      xdg_surface;
+      geometry = info.geometry;
+      xdg_role = `None;
+      override_redirect = info.win_attrs.override_redirect;
+    } in
     Hashtbl.add t.paired window paired;
     Hashtbl.add t.of_host_surface (Wayland.Proxy.id host_surface) paired;
     let fallback_parent = if parent = None then last_event_surface t else parent in
@@ -666,7 +678,7 @@ let pair t ~set_configured ~host_surface window =
     | (`Normal | `Dialog), _
     | _, None ->  (* (if we don't have a parent, then we must make it a top-level) *)
       Log.info (fun f -> f "Open %a as top-level" pp_paired paired);
-      let toplevel = init_toplevel t ~x11 ~xdg_surface ~info window in
+      let toplevel = init_toplevel t ~x11 ~xdg_surface ~info ~paired window in
       paired.xdg_role <- `Toplevel toplevel;
       let parent = if info.window_type = `Normal then parent else fallback_parent in
       parent |> Option.iter (fun parent ->
@@ -677,7 +689,7 @@ let pair t ~set_configured ~host_surface window =
       Wayland.Wayland_client.Wl_surface.commit host_surface
     | (`DnD | `Unknown), Some parent ->
       Log.info (fun f -> f "Open %a as popup" pp_paired paired);
-      let popup = init_popup t ~x11 ~xdg_surface ~info ~parent window in
+      let popup = init_popup t ~x11 ~xdg_surface ~info ~parent ~paired window in
       paired.xdg_role <- `Popup popup;
       Wayland.Wayland_client.Wl_surface.commit host_surface
   ) else (
@@ -899,7 +911,6 @@ let listen_x11 ~selection t =
       let* () = X11.Window.configure x11 window ~stack_mode:`Below in
       X11.Window.map x11 window
 
-    (* todo: send a synthetic ConfigureNotify event if nothing changed *)
     method configure_request ~window ~width ~height =
       match Hashtbl.find_opt t.paired window with
       | None ->
@@ -907,10 +918,15 @@ let listen_x11 ~selection t =
            However, this makes some windows look ugly, and Sway seems to allow any size. *)
         (* let (width, height) = scale_to_host t (width, height) |> scale_to_client t in *)
         X11.Window.configure x11 window ~width ~height ~border_width:0
+        (* todo: send a synthetic ConfigureNotify event if nothing changed *)
       | Some p ->
         (* For now, don't allow apps to change their own size once mapped. *)
-        Log.info (fun f -> f "Ignoring ConfigureRequest for already-mapped window %a" pp_paired p);
-        Lwt.return_unit
+        Log.info (fun f -> f "Refusing ConfigureRequest for already-mapped window %a" pp_paired p);
+        X11.Window.configure_notify x11 ~event:window ~window
+          ~above_sibling:None
+          ~geometry:p.geometry
+          ~border_width:0
+          ~override_redirect:p.override_redirect
 
     method property_notify ~window ~atom ~time:_ ~state =
       Log.info (fun f -> f "PropertyNotify: %a/%a %s" X11.Window.pp window (X11.Atom.pp x11) atom
