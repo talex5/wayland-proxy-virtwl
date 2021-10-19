@@ -412,3 +412,43 @@ module SetInputFocus = struct
 end
 
 let set_input_focus_checked = SetInputFocus.send_checked
+
+module ConfigureNotify = struct
+  [%%cstruct
+    type req = {
+      code : uint8_t;
+      unused : uint8_t;
+      seq : uint16_t;   (* set by server *)
+      event : uint32_t;
+      window : uint32_t;
+      above_sibling : uint32_t;
+      x : int16_t;
+      y : int16_t;
+      width : uint16_t;
+      height : uint16_t;
+      border_width : uint16_t;
+      override_redirect : uint8_t;
+      unused2 : uint8_t [@len 5];
+    } [@@little_endian]
+  ]
+
+  let send t ~event ~window ~above_sibling ~geometry ~border_width ~override_redirect =
+    Log.info (fun f -> f "ConfigureNotify(%a/%a): above:%a %a"
+                 pp event
+                 pp window
+                 (Fmt.Dump.option pp) above_sibling
+                 Geometry.pp geometry);
+    Request.send_event t ~window ~propagate:false ~event_mask:0l @@ fun r ->
+    set_req_code r 22;
+    set_req_event r event;
+    set_req_window r window;
+    set_req_above_sibling r (Option.value above_sibling ~default:0l);
+    set_req_x r geometry.x;
+    set_req_y r geometry.y;
+    set_req_width r geometry.width;
+    set_req_height r geometry.height;
+    set_req_border_width r border_width;
+    set_req_override_redirect r (Bool.to_int override_redirect)
+end
+
+let configure_notify = ConfigureNotify.send
