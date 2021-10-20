@@ -1273,9 +1273,8 @@ let accept ?xwayland t client =
     ) else Lwt.return_unit
   in
   let* () = Lwt.choose [client_done; host_done] in
-  let* () = t.host_transport#close
-  and* () = client_transport#close
-  in
+  let* () = t.host_transport#close in
+  (* Note: we don't close the client; the caller does that *)
   Lwt.return_unit
 
 let registry t = t.host_registry
