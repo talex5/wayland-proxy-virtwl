@@ -36,7 +36,9 @@ let of_context_fd fd : #Wayland.S.transport =
 
     method close =
       up <- false;
-      Lwt_unix.close fd
+      match Lwt_unix.state fd with
+      | Opened -> Lwt_unix.close fd
+      | Closed | Aborted _ -> Lwt.return_unit
 
   method pp f = Fmt.string f "virtwl"
   end
