@@ -548,7 +548,7 @@ let examine_window t window : window_info Lwt.t =
       | ty :: _ when ty = type_dnd -> `DnD
       | _ :: tys -> aux tys
     in
-    if window_type = [] then `Normal else aux window_type
+    if window_type = [] && not win_attrs.override_redirect then `Normal else aux window_type
   in
   Lwt.return {
     title;
@@ -668,7 +668,9 @@ let pair t ~set_configured ~host_surface window =
         method on_configure proxy ~serial =
           if Proxy.can_send proxy then Xdg_surface.ack_configure proxy ~serial;
           set_configured (
-            if info.window_type = `Normal && info.win_attrs.override_redirect then `Hide else `Show
+            match info.geometry with
+            | { width = 1; height = 1; _ } when info.win_attrs.override_redirect -> `Hide 
+            | _ -> `Show
           )
       end in
     let paired = {
