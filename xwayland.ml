@@ -508,7 +508,7 @@ end
 
 type window_info = {
   title : string;
-  window_type : [`Normal | `Dialog | `DnD | `Unknown];
+  window_type : [`Normal | `Dialog | `DnD | `Popup | `Unknown];
   wm_normal_hints : X11.Icccm.Wm_normal_hints.t;
   transient_for : X11.Window.t option;
   win_attrs : X11.Window.attributes;
@@ -523,12 +523,14 @@ let examine_window t window : window_info Lwt.t =
     X11.Property.get_string x11 window wm_name >|= Option.value ~default:"<untitled>"
   and* window_type =
     let* net_wm_window_type = intern t "_NET_WM_WINDOW_TYPE" in
-    X11.Property.get_atom x11 window net_wm_window_type
+    X11.Property.get_atoms x11 window net_wm_window_type
   and* wm_normal_hints = X11.Icccm.get_wm_normal_hints x11 window
   and* win_attrs = X11.Window.get_attributes x11 window
   and* type_normal = intern t "_NET_WM_WINDOW_TYPE_NORMAL"
   and* type_dialog = intern t "_NET_WM_WINDOW_TYPE_DIALOG"
   and* type_dnd = intern t "_NET_WM_WINDOW_TYPE_DND"
+  and* type_dropdown_menu = intern t "_NET_WM_WINDOW_TYPE_DROPDOWN_MENU"
+  and* type_popup_menu = intern t "_NET_WM_WINDOW_TYPE_POPUP_MENU"
   and* transient_for =
     let* transient_for = intern t "WM_TRANSIENT_FOR" in
     X11.Property.get x11 window transient_for ~long_offset:0l ~long_length:1l >|= Option.map (fun info ->
@@ -537,11 +539,16 @@ let examine_window t window : window_info Lwt.t =
   and* geometry = X11.Window.get_geometry x11 window
   in
   let window_type =
-    let ty = Option.value window_type ~default:type_normal in
-    if ty = type_normal then `Normal
-    else if ty = type_dialog then `Dialog
-    else if ty = type_dnd then `DnD
-    else `Unknown
+    let rec aux = function
+      | [] -> `Unknown
+      | ty :: _ when ty = type_normal -> `Normal
+      | ty :: _ when ty = type_dialog -> `Dialog
+      | ty :: _ when ty = type_dropdown_menu -> `Popup
+      | ty :: _ when ty = type_popup_menu -> `Popup
+      | ty :: _ when ty = type_dnd -> `DnD
+      | _ :: tys -> aux tys
+    in
+    if window_type = [] && not win_attrs.override_redirect then `Normal else aux window_type
   in
   Lwt.return {
     title;
@@ -661,7 +668,9 @@ let pair t ~set_configured ~host_surface window =
         method on_configure proxy ~serial =
           if Proxy.can_send proxy then Xdg_surface.ack_configure proxy ~serial;
           set_configured (
-            if info.window_type = `Normal && info.win_attrs.override_redirect then `Hide else `Show
+            match info.geometry with
+            | { width = 1; height = 1; _ } when info.win_attrs.override_redirect -> `Hide 
+            | _ -> `Show
           )
       end in
     let paired = {
@@ -687,7 +696,7 @@ let pair t ~set_configured ~host_surface window =
           | _ -> Log.info (fun f -> f "Parent %a is not a toplevel!" pp_paired parent)
         );
       Wayland.Wayland_client.Wl_surface.commit host_surface
-    | (`DnD | `Unknown), Some parent ->
+    | (`DnD | `Popup | `Unknown), Some parent ->
       Log.info (fun f -> f "Open %a as popup" pp_paired paired);
       let popup = init_popup t ~x11 ~xdg_surface ~info ~parent ~paired window in
       paired.xdg_role <- `Popup popup;
