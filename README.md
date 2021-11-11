@@ -81,6 +81,8 @@ Limitations:
 
 - Drag-and-drop will not work, even between X applications, as the (hidden) X11 window layout used by X11 applications does not match the Wayland compositor's layout. Wayland does not provide layout information to us, so there's not much that can be done here.
 
+For more details, see [Isolating Xwayland in a VM][xwayland-blog].
+
 ## Logging
 
 There are several ways to enable logging:
@@ -135,3 +137,4 @@ This is useful if an application is misbehaving and you want to check its recent
 
 [sommelier]: https://chromium.googlesource.com/chromiumos/platform2/+/main/vm_tools/sommelier/
 [ocaml-wayland]: https://github.com/talex5/ocaml-wayland
+[xwayland-blog]: https://roscidus.com/blog/blog/2021/10/30/xwayland/
