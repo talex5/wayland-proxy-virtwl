@@ -129,11 +129,94 @@ This is useful if an application is misbehaving and you want to check its recent
 `tests/test.ml` is a simple test application that uses the virtwl kernel interface directly
 (without the proxy), avoiding any copying.
 
+## Hacking
+
+Execution starts in `main.ml`,
+which parses the command-line arguments and then starts listening for Wayland and/or X connections.
+
+Wayland connections are handled by `relay.ml`.
+`Relay.create` connects to the host compositor and `Relay.accept` accepts the connection from the client
+(each connection gets its own relay anyway, but this split simplifies the code a bit).
+`make_registry` generates the `Wl_registry` object offered to clients.
+When a client binds to one of the offered APIs,
+the `on_bind` method binds the corresponding host API and calls an API-specific function to relay messages
+between the new client-side object and the new host object.
+
+There is one function for each Wayland interface.
+For example, the `Xdg_popup` interface is handled like this:
+
+```ocaml
+let make_popup ~host_popup c =
+  let h = host_popup @@ object
+      inherit [_] H.Xdg_popup.v1
+      method on_popup_done _ = C.Xdg_popup.popup_done c
+      method on_configure _ = C.Xdg_popup.configure c
+      method on_repositioned _ = C.Xdg_popup.repositioned c
+    end
+  in
+  Proxy.Handler.attach c @@ object
+    inherit [_] C.Xdg_popup.v1
+    method on_destroy = delete_with H.Xdg_popup.destroy h
+    method on_grab _ ~seat = H.Xdg_popup.grab h ~seat:(to_host seat)
+    method on_reposition _ ~positioner = H.Xdg_popup.reposition h ~positioner:(to_host positioner)
+  end
+```
+
+The `host_popup` function will create the host object, once you provide a set of event handlers for it.
+`c` is the corresponding client-side object.
+Whenever you get an event from the host, send the same event to the client.
+The client-side APIs are accessible via the `C` module, and the host-side ones via `H`.
+
+Then `Handler.attach c` sets up handlers for requests from the client.
+When you get a request, make the corresponding request on the host object.
+`on_destroy` can be handled using `delete_with` so that the generated `delete_id` event gets relayed too.
+
+If the trailing arguments are the same, they are often omitted.
+For example, `on_configure` above could have been written out in full as:
+
+```ocaml
+  let h = host_popup @@ object
+      inherit [_] H.Xdg_popup.v1
+      [...]
+      method on_configure _ ~x ~y ~width ~height =
+        C.Xdg_popup.configure c ~x ~y ~width ~height
+```
+
+If an argument is another object, you will need to convert it.
+For example, when the client makes a `grab` request they pass a client-side `Wl_seat` object.
+When calling the host compositor, we must pass the corresponding host-side object.
+`to_host` and `to_client` perform these conversions.
+Objects that require conversion in this way must provide a `user_data` method to get their peer.
+
+Objects that need to do special things when running under virtwl take an extra `virtwl` option with a connection to `/dev/wl0`.
+Objects that interact with Xwayland take an `xwayland` option with hooks for that.
+
+### Updating a protocol
+
+The proxy can only relay messages it knows about.
+To add support for a newer version of protocol:
+
+1. Update the XML file in <https://github.com/talex5/ocaml-wayland/tree/master/protocols>.
+2. Build the proxy with the new version of ocaml-wayland,
+   either by installing it with opam or by putting it inside the proxy's directory
+   (note that the proxy might already contain a git-submodule of it; update that if so).
+3. The compiler errors will take you to any places that need updating.
+
+### Adding a new protocol
+
+0. Run your test application with `WAYLAND_DEBUG=1` directly on the host to find out what protocol it needs.
+1. Add the XML file to ocaml-wayland's `protocols` directory, and extend the `dune` file to build it.
+2. Import it into `c.ml`, `h.ml` and `protocols.ml`.
+   These just provide aliases so you can e.g. refer to a client `Wl_surface` as `C.Wl_surface`.
+3. Extend `relay.ml`'s `registry` function: list the new interface and handle it in `on_bind`.
+4. You can mostly just follow the compiler errors to implement it, copying the pattern of the other objects.
+
+If your interface needs to do things with virtwl, it's probably easiest to get it working on the host, without virtwl, first.
+
 ## TODO
 
 - Find alternative to private `caml_unix_mapped_alloc`.
 - Only copy the buffer regions that have changed.
-- Fork a subprocess for each connection, like sommelier.
 
 [sommelier]: https://chromium.googlesource.com/chromiumos/platform2/+/main/vm_tools/sommelier/
 [ocaml-wayland]: https://github.com/talex5/ocaml-wayland
