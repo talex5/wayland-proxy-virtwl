@@ -466,7 +466,7 @@ let make_surface ~xwayland ~host_surface c =
       if x#scale <> 1l then
         H.Wl_surface.set_buffer_scale h ~scale:x#scale;       (* Xwayland will be a new enough version *)
       let set_configured s =
-        if s = `Unmanaged then (
+        if s = `Unmanaged && x#scale <> 1l then (
           (* For pointer cursors we want them at the normal size, even if low-res.
              Also, Vim tries to hide the pointer by setting a 1x1 cursor, which confuses things
              when unscaled. Ideally we would stop doing transforms in this case, but it doesn't
