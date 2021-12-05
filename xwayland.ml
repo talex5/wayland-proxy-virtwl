@@ -129,9 +129,8 @@ module Selection = struct
     x11 : X11.Display.t Lwt.t;
     wayland_primary_offer : [`V1] Primary_offer.t option ref;
     wayland_clipboard_offer : [`V1|`V2|`V3] Clipboard_offer.t option ref;
-    primary_selection_mgr : [`V1] Primary_mgr.t;
+    primary_selection : ([`V1] Primary_mgr.t * [`V1] Primary_device.t) option;
     clipboard_mgr : [`V1] Clipboard_mgr.t;
-    primary_device : [`V1] Primary_device.t;
     clipboard_device : [`V1] Clipboard_device.t;
     selection_window : X11.Window.t Lwt.t;
     set_selection_window : X11.Window.t Lwt.u;
@@ -358,39 +357,42 @@ module Selection = struct
   (* We lost our ownership of the X selection. This means that an X client now owns the selection.
      Tell Wayland that we can now provide that selection to it. *)
   let set_x_owned_primary t =
-    let* x11 = t.x11 in
-    (* Find out what targets the X app is offering *)
-    let* primary = X11.Atom.intern x11 "PRIMARY" in
-    let* targets_atom = X11.Atom.intern x11 "TARGETS" in
-    let* requestor = t.selection_window in
-    let* targets =
-      fetch_selection t primary
-        ~requestor
-        ~target:targets_atom
-        ~property:targets_atom
-      >>= function
-      | Some x -> parse_targets x11 x
-      | None -> Lwt.return []
-    in
-    (* Create a Wayland source offering those targets *)
-    let source = Primary_mgr.create_source t.primary_selection_mgr @@ object
-        inherit [_] Primary_source.v1
+    match t.primary_selection with
+    | None -> Lwt.return_unit
+    | Some (primary_selection_mgr, primary_device) ->
+      let* x11 = t.x11 in
+      (* Find out what targets the X app is offering *)
+      let* primary = X11.Atom.intern x11 "PRIMARY" in
+      let* targets_atom = X11.Atom.intern x11 "TARGETS" in
+      let* requestor = t.selection_window in
+      let* targets =
+        fetch_selection t primary
+          ~requestor
+          ~target:targets_atom
+          ~property:targets_atom
+        >>= function
+        | Some x -> parse_targets x11 x
+        | None -> Lwt.return []
+      in
+      (* Create a Wayland source offering those targets *)
+      let source = Primary_mgr.create_source primary_selection_mgr @@ object
+          inherit [_] Primary_source.v1
 
-        method on_send _ ~mime_type ~fd =
-          Log.info (fun f -> f "Sending X PRIMARY selection to Wayland (%S)" mime_type);
-          send_x_selection t primary ~via:requestor ~mime_type ~dst:fd
+          method on_send _ ~mime_type ~fd =
+            Log.info (fun f -> f "Sending X PRIMARY selection to Wayland (%S)" mime_type);
+            send_x_selection t primary ~via:requestor ~mime_type ~dst:fd
 
-        method on_cancelled self =
-          Log.info (fun f -> f "X selection source cancelled by Wayland - X app no longer owns selection");
-          Lwt.async (fun () ->
-              X11.Selection.set_owner x11 ~owner:(Some requestor) ~timestamp:`CurrentTime primary
-            );
-          Primary_source.destroy self
-      end
-    in
-    targets |> List.iter (fun mime_type -> Primary_source.offer source ~mime_type);
-    Primary_device.set_selection t.primary_device ~source:(Some source) ~serial:(Relay.last_serial t.relay);
-    Lwt.return_unit
+          method on_cancelled self =
+            Log.info (fun f -> f "X selection source cancelled by Wayland - X app no longer owns selection");
+            Lwt.async (fun () ->
+                X11.Selection.set_owner x11 ~owner:(Some requestor) ~timestamp:`CurrentTime primary
+              );
+            Primary_source.destroy self
+        end
+      in
+      targets |> List.iter (fun mime_type -> Primary_source.offer source ~mime_type);
+      Primary_device.set_selection primary_device ~source:(Some source) ~serial:(Relay.last_serial t.relay);
+      Lwt.return_unit
 
   (* Similar to {!set_x_owned_primary}, but for Wayland's clipboard API. *)
   let set_x_owned_clipboard t =
@@ -478,13 +480,20 @@ module Selection = struct
       failwith "Expected exactly one X11 root window!"
 
   let create ~relay ~seat ~x11 ~virtwl ~registry =
-    let primary_selection_mgr = Wayland.Registry.bind registry @@ new Primary_mgr.v1 in
     let clipboard_mgr = Wayland.Registry.bind registry @@ new Clipboard_mgr.v1 in
     let selection_window, set_selection_window = Lwt.wait () in
     let clipboard_window, set_clipboard_window = Lwt.wait () in
     let wayland_primary_offer = ref None in
     let wayland_clipboard_offer = ref None in
-    let primary_device = Primary_mgr.get_device primary_selection_mgr ~seat @@ primary_device ~wayland_primary_offer in
+    let primary_selection =
+      match Wayland.Registry.bind registry @@ new Primary_mgr.v1 with
+      | mgr ->
+        let dev = Primary_mgr.get_device mgr ~seat @@ primary_device ~wayland_primary_offer in
+        Some (mgr, dev)
+      | exception ex ->
+        Log.warn (fun f -> f "Can't get primary selection manager: %a" Fmt.exn ex);
+        None
+    in
     let clipboard_device = Clipboard_mgr.get_data_device clipboard_mgr ~seat @@ clipboard_device ~wayland_clipboard_offer in
     {
       x11;
@@ -495,8 +504,7 @@ module Selection = struct
       wayland_primary_offer;
       selection_window;
       set_selection_window;
-      primary_selection_mgr;
-      primary_device;
+      primary_selection;
       (* Clipboard: *)
       wayland_clipboard_offer;
       clipboard_window;
