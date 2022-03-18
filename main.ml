@@ -115,9 +115,9 @@ let args =
     ~doc:"Sub-command to execute"
     []
 
-let virtwl_proxy = Term.(ret (const main $ Trace.cmdliner $ wayland_display $ x_display $ Config.cmdliner $ args))
-
-let term_exit (x : unit Term.result) = Term.exit x
+let virtwl_proxy =
+  let info = Cmd.info "wayland-proxy-virtwl" in
+  Cmd.v info Term.(ret (const main $ Trace.cmdliner $ wayland_display $ x_display $ Config.cmdliner $ args))
 
 let () =
-  term_exit @@ Term.eval (virtwl_proxy, Term.info "wayland-proxy-virtwl")
+  exit @@ Cmd.eval virtwl_proxy

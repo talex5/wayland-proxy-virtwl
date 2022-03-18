@@ -10,7 +10,7 @@
  (synopsis "Proxy Wayland connections across the VM boundary")
  (depends
    (logs (>= 0.7.0))
-   (cmdliner (>= 1.0.4))
+   (cmdliner (>= 1.1.0))
    (cstruct (>= 6.0.0))
    (cstruct-lwt (>= 6.0.0))
    (ppx_cstruct (>= 6.0.0))
