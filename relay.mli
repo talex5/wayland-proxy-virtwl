@@ -35,17 +35,13 @@ type xwayland_hooks = <
 
 type t
 
-val create : Config.t -> t Lwt.t
+val create : ?virtio_gpu:Virtio_gpu.t -> Config.t -> t Lwt.t
 (** [create config] creates a new relay and connects it to the host compositor. *)
 
 val accept : ?xwayland:xwayland_hooks -> t -> Lwt_unix.file_descr -> unit Lwt.t
 (** [accept t client] talks the Wayland protocol to [client], relaying messages via [t]. *)
 
 val registry : t -> Wayland.Registry.t
-
-val virtwl : t -> Wayland_virtwl.t option
-(** [virtwl t] is the virtwl connection, if any.
-    If [None], we have a normal connection to the host compositor, and can shared FDs directly. *)
 
 val update_serial : t -> int32 -> unit
 (** [update_serial t serial] sets [serial] as the last known serial number from the host. *)

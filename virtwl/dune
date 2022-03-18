@@ -1,4 +1,0 @@
-(library
-  (name wayland_virtwl)
-  (libraries wayland logs logs.fmt)
-  (foreign_stubs (language c) (names virtwl_stubs)))

@@ -19,29 +19,3 @@ let copy_stream ~src ~dst =
     )
   in
   aux ()
-
-(** [with_wrapped_writeable virtwl client_fd f] creates a new pipe from the host,
-    calls [f pipe_fd], and spawns a background thread that copies from the host
-    to [client_fd]. [pipe_fd] can be passed to virtwl. Takes ownership of [client_fd].
-    If [virtwl = None] then it just passes [fd] though directly and then closes it. *)
-let with_wrapped_writeable ~virtwl fd f : unit =
-  match virtwl with
-  | None ->
-    Fun.protect (fun () -> f fd)
-      ~finally:(fun () -> Unix.close fd)
-  | Some virtwl ->
-    let host_fd = Wayland_virtwl.pipe_read virtwl in
-    Lwt.dont_wait (fun () ->
-        Lwt.finalize
-          (fun () ->
-             f host_fd;
-             let host_fd = Lwt_unix.of_unix_file_descr host_fd in
-             let client_fd = Lwt_unix.of_unix_file_descr fd in
-             copy_stream ~src:host_fd ~dst:client_fd)
-          (fun () ->
-             Unix.close host_fd;
-             Unix.close fd;
-             Lwt.return_unit
-          )
-      )
-      (fun ex -> Log.warn (fun f -> f "Error copying data stream: %a" Fmt.exn ex))

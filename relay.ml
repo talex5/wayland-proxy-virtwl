@@ -1,5 +1,5 @@
-(* Relay Wayland messages between a client and a virtwl host compositor.
-   When sending a file descriptor, we create a virtwl descriptor of the appropriate type and send that instead.
+(* Relay Wayland messages between a client and a virtio_gpu host compositor.
+   When sending a file descriptor, we create a virtio_gpu descriptor of the appropriate type and send that instead.
    For streams, we copy the data.
    For buffers we copy the contents when the surface is committed (todo: copy just the damaged region).
    We generally ignore the version part of the ocaml-wayland types and just cast as necessary.
@@ -8,8 +8,6 @@
 
 open Lwt.Syntax
 open Wayland
-
-let virtwl_dev = "/dev/wl0"
 
 (* Since we're just relaying messages, we mostly don't care about checking version compatibility.
    e.g. if a client sends us a v5 message, then we can assume the corresponding server object
@@ -71,7 +69,7 @@ type transport = < S.transport; close:unit Lwt.t >
 
 type t = {
   config : Config.t;
-  virtwl : Wayland_virtwl.t option;
+  virtio_gpu : Virtio_gpu.t option;
   host_transport : transport;
   host_closed : (unit, exn) Lwt_result.t;
   host_display : Client.t;
@@ -219,14 +217,14 @@ module Shm : sig
 
   val create :
     host_shm:[`V1] H.Wl_shm.t ->
-    virtwl:Wayland_virtwl.t ->
+    virtio_gpu:Virtio_gpu.t ->
     client_fd:Unix.file_descr ->
     size:int32 ->
     [`V1] C.Wl_shm_pool.t ->
     t
-  (** [create ~host_shm ~virtwl ~client_fd ~size proxy] is a pool proxy that creates a host pool of size [size],
+  (** [create ~host_shm ~virtio_gpu ~client_fd ~size proxy] is a pool proxy that creates a host pool of size [size],
       and maps that and [client_fd] into our address space.
-      @param virtwl Used to create a memory region that can be shared with the host.
+      @param virtio_gpu Used to create a memory region that can be shared with the host.
       @param host_shm Used to notify the host compositor about the new region.
       @param client_fd Used to map the client's memory. Will be closed when the ref-count reaches zero.
       @param proxy [client_fd] is closed when this and all buffers have been destroyed. *)
@@ -261,12 +259,18 @@ end = struct
 
   type t = {
     host_shm : [`V1 ] H.Wl_shm.t;
-    virtwl : Wayland_virtwl.t;
+    virtio_gpu : Virtio_gpu.t;
     mutable size : int32;
     mutable client_fd : Unix.file_descr option; (* [client_fd = None <=> ref_count = 0 *)
     mutable ref_count : int;                    (* The number of client proxies (pool + buffers) active *)
     mutable mapping : mapping option;           (* If [None] then map when needed *)
   }
+
+  let with_memory_fd t ~size fn =
+    let fd = Virtio_gpu.alloc t.virtio_gpu ~size in
+    match fn fd with
+    | x -> Unix.close fd; x
+    | exception ex -> Unix.close fd; raise ex
 
   (* This is called when we attach a buffer to a surface
      (so the client-side buffer proxy must still exist). *)
@@ -279,13 +283,12 @@ end = struct
       let size = Int32.to_int t.size in
       let client_memory_pool = Unix.map_file client_fd Bigarray.Char Bigarray.c_layout true [| size |] in
       let host_pool, host_memory_pool =
-        Wayland_virtwl.with_memory_fd t.virtwl ~size (fun fd ->
+        with_memory_fd t ~size (fun fd ->
             let host_pool = H.Wl_shm.create_pool t.host_shm ~fd ~size:t.size @@ new H.Wl_shm_pool.v1 in
-            let host_memory = Wayland_virtwl.map_file fd Bigarray.Char ~n_elements:size in
+            let host_memory = Virtio_gpu.Utils.safe_map_file fd ~kind:Bigarray.Char ~len:size in
             host_pool, host_memory
           )
       in
-      let host_memory_pool = Bigarray.array1_of_genarray host_memory_pool in
       let client_memory_pool = Bigarray.array1_of_genarray client_memory_pool in
       let m = { host_pool; client_memory_pool; host_memory_pool } in
       t.mapping <- Some m;
@@ -357,10 +360,10 @@ end = struct
   let destroy_buffer b =
     Lazy.force b.on_destroy
 
-  let create ~host_shm ~virtwl ~client_fd ~size client_shm =
+  let create ~host_shm ~virtio_gpu ~client_fd ~size client_shm =
     let t = {
       host_shm;
-      virtwl;
+      virtio_gpu;
       size;
       client_fd = Some client_fd;
       ref_count = 1;
@@ -530,8 +533,8 @@ let make_buffer b proxy =
 
 (* todo: this all needs to be more robust.
    Also, sealing? *)
-let make_shm_pool_virtwl ~virtwl ~host_shm proxy ~fd:client_fd ~size:orig_size =
-  let mapping = Shm.create ~host_shm ~virtwl ~client_fd ~size:orig_size proxy in
+let make_shm_pool_virtwl ~virtio_gpu ~host_shm proxy ~fd:client_fd ~size:orig_size =
+  let mapping = Shm.create ~host_shm ~virtio_gpu ~client_fd ~size:orig_size proxy in
   Proxy.Handler.attach proxy @@ object
     inherit [_] C.Wl_shm_pool.v1
 
@@ -698,7 +701,7 @@ let make_seat ~xwayland t bind c =
     method on_release = delete_with H.Wl_seat.release host
   end
 
-let make_shm ~virtwl bind c =
+let make_shm ~virtio_gpu bind c =
   let c = Proxy.cast_version c in
   let h = bind @@ object
       inherit [_] H.Wl_shm.v1
@@ -708,8 +711,8 @@ let make_shm ~virtwl bind c =
   Proxy.Handler.attach c @@ object
     inherit [_] C.Wl_shm.v1
     method on_create_pool _ proxy ~fd ~size =
-      match virtwl with
-      | Some virtwl -> make_shm_pool_virtwl ~virtwl ~host_shm:h proxy ~fd ~size
+      match virtio_gpu with
+      | Some virtio_gpu -> make_shm_pool_virtwl ~virtio_gpu ~host_shm:h proxy ~fd ~size
       | None ->
         let host_pool = H.Wl_shm.create_pool h ~fd ~size @@ new H.Wl_shm_pool.v1 in
         Unix.close fd;
@@ -896,7 +899,7 @@ let make_kde_decoration_manager bind c =
       make_kde_decoration ~host_decoration:(H.Org_kde_kwin_server_decoration_manager.create h ~surface) decoration
   end
 
-let make_data_offer ~virtwl ~client_offer h =
+let make_data_offer ~client_offer h =
   let c = client_offer @@ object
       inherit [_] C.Wl_data_offer.v1
       method on_accept _ = H.Wl_data_offer.accept h
@@ -907,8 +910,8 @@ let make_data_offer ~virtwl ~client_offer h =
         Proxy.delete h
       method on_finish _ = H.Wl_data_offer.finish h
       method on_receive _ ~mime_type ~fd =
-        Pipes.with_wrapped_writeable ~virtwl fd @@ fun fd ->
-        H.Wl_data_offer.receive h ~mime_type ~fd
+        H.Wl_data_offer.receive h ~mime_type ~fd;
+        Unix.close fd
       method on_set_actions _ = H.Wl_data_offer.set_actions h
     end in
   let user_data = host_data (HD.Data_offer c) in
@@ -943,11 +946,11 @@ let make_data_source ~host_source c =
     method on_set_actions _ = H.Wl_data_source.set_actions h
   end
 
-let make_data_device ~xwayland ~virtwl ~host_device c =
+let make_data_device ~xwayland ~host_device c =
   let c = cv c in
   let h = host_device @@ object
       inherit [_] H.Wl_data_device.v1
-      method on_data_offer _ offer = make_data_offer ~virtwl ~client_offer:(C.Wl_data_device.data_offer c) offer
+      method on_data_offer _ offer = make_data_offer ~client_offer:(C.Wl_data_device.data_offer c) offer
       method on_drop _ = C.Wl_data_device.drop c
 
       method on_enter _ ~serial ~surface ~x ~y offer =
@@ -973,7 +976,7 @@ let make_data_device ~xwayland ~virtwl ~host_device c =
         ~icon:(Option.map to_host icon)
   end
 
-let make_data_device_manager ~xwayland ~virtwl bind proxy =
+let make_data_device_manager ~xwayland bind proxy =
   let proxy = Proxy.cast_version proxy in
   let h = cv @@ bind @@ new H.Wl_data_device_manager.v1 in
   Proxy.Handler.attach proxy @@ object
@@ -982,11 +985,11 @@ let make_data_device_manager ~xwayland ~virtwl bind proxy =
       make_data_source c ~host_source:(H.Wl_data_device_manager.create_data_source h)
     method on_get_data_device _ c ~seat =
       let seat = to_host seat in
-      make_data_device ~xwayland ~virtwl c ~host_device:(H.Wl_data_device_manager.get_data_device h ~seat)
+      make_data_device ~xwayland c ~host_device:(H.Wl_data_device_manager.get_data_device h ~seat)
   end
 
 module Gtk_primary = struct
-  let make_gtk_data_offer ~virtwl ~client_offer h =
+  let make_gtk_data_offer ~client_offer h =
     let c = client_offer @@ object
         inherit [_] C.Gtk_primary_selection_offer.v1
 
@@ -997,8 +1000,8 @@ module Gtk_primary = struct
           Proxy.delete h
 
         method on_receive _ ~mime_type ~fd =
-          Pipes.with_wrapped_writeable ~virtwl fd @@ fun fd ->
-          H.Zwp_primary_selection_offer_v1.receive h ~mime_type ~fd
+          H.Zwp_primary_selection_offer_v1.receive h ~mime_type ~fd;
+          Unix.close fd
       end in
     let user_data = host_data (HD.Gtk_data_offer c) in
     Proxy.Handler.attach h @@ object
@@ -1024,10 +1027,10 @@ module Gtk_primary = struct
       method on_offer _ = H.Zwp_primary_selection_source_v1.offer h
     end
 
-  let make_gtk_primary_selection_device ~virtwl ~host_device c =
+  let make_gtk_primary_selection_device ~host_device c =
     let h = host_device @@ object
         inherit [_] H.Zwp_primary_selection_device_v1.v1
-        method on_data_offer _ offer = make_gtk_data_offer ~virtwl ~client_offer:(C.Gtk_primary_selection_device.data_offer c) offer
+        method on_data_offer _ offer = make_gtk_data_offer ~client_offer:(C.Gtk_primary_selection_device.data_offer c) offer
         method on_selection _ offer =
           let to_client x =
             let Host_data data = user_data x in
@@ -1049,7 +1052,7 @@ module Gtk_primary = struct
         H.Zwp_primary_selection_device_v1.set_selection h ~source
     end
 
-  let make_device_manager ~virtwl bind proxy =
+  let make_device_manager bind proxy =
     let proxy = Proxy.cast_version proxy in
     let h = bind @@ new H.Zwp_primary_selection_device_manager_v1.v1 in
     Proxy.Handler.attach proxy @@ object
@@ -1061,13 +1064,13 @@ module Gtk_primary = struct
       method on_get_device _ dev ~seat =
         let seat = to_host seat in
         let host_device = H.Zwp_primary_selection_device_manager_v1.get_device h ~seat in
-        make_gtk_primary_selection_device ~virtwl ~host_device dev
+        make_gtk_primary_selection_device ~host_device dev
     end
 end
 
 (* This is basically the same as [Gtk_primary], but with things renamed a bit. *)
 module Zwp_primary = struct
-  let make_data_offer ~virtwl ~client_offer h =
+  let make_data_offer ~client_offer h =
     let c = client_offer @@ object
         inherit [_] C.Zwp_primary_selection_offer_v1.v1
 
@@ -1078,8 +1081,8 @@ module Zwp_primary = struct
           Proxy.delete h
 
         method on_receive _ ~mime_type ~fd =
-          Pipes.with_wrapped_writeable ~virtwl fd @@ fun fd ->
-          H.Zwp_primary_selection_offer_v1.receive h ~mime_type ~fd
+          H.Zwp_primary_selection_offer_v1.receive h ~mime_type ~fd;
+          Unix.close fd
       end in
     let user_data = host_data (HD.Zwp_data_offer c) in
     Proxy.Handler.attach h @@ object
@@ -1105,10 +1108,10 @@ module Zwp_primary = struct
       method on_offer _ = H.Zwp_primary_selection_source_v1.offer h
     end
 
-  let make_primary_selection_device ~virtwl ~host_device c =
+  let make_primary_selection_device ~host_device c =
     let h = host_device @@ object
         inherit [_] H.Zwp_primary_selection_device_v1.v1
-        method on_data_offer _ offer = make_data_offer ~virtwl ~client_offer:(C.Zwp_primary_selection_device_v1.data_offer c) offer
+        method on_data_offer _ offer = make_data_offer ~client_offer:(C.Zwp_primary_selection_device_v1.data_offer c) offer
         method on_selection _ offer = C.Zwp_primary_selection_device_v1.selection c (Option.map to_client offer)
       end in
     Proxy.Handler.attach c @@ object
@@ -1119,7 +1122,7 @@ module Zwp_primary = struct
         H.Zwp_primary_selection_device_v1.set_selection h ~source
     end
 
-  let make_device_manager ~virtwl bind proxy =
+  let make_device_manager bind proxy =
     let proxy = Proxy.cast_version proxy in
     let h = bind @@ new H.Zwp_primary_selection_device_manager_v1.v1 in
     Proxy.Handler.attach proxy @@ object
@@ -1131,7 +1134,7 @@ module Zwp_primary = struct
       method on_get_device _ dev ~seat =
         let seat = to_host seat in
         let host_device = H.Zwp_primary_selection_device_manager_v1.get_device h ~seat in
-        make_primary_selection_device ~virtwl ~host_device dev
+        make_primary_selection_device ~host_device dev
     end
 end
 
@@ -1198,12 +1201,12 @@ let make_registry ~xwayland t reg =
       match Proxy.ty proxy with
       | Wl_compositor.T -> make_compositor ~xwayland bind proxy
       | Wl_subcompositor.T -> make_subcompositor ~xwayland bind proxy
-      | Wl_shm.T -> make_shm ~virtwl:t.virtwl bind proxy
+      | Wl_shm.T -> make_shm ~virtio_gpu:t.virtio_gpu bind proxy
       | Wl_seat.T -> make_seat ~xwayland t bind proxy
       | Wl_output.T -> make_output ~xwayland bind proxy
-      | Wl_data_device_manager.T -> make_data_device_manager ~xwayland ~virtwl:t.virtwl bind proxy
-      | Gtk_primary_selection_device_manager.T -> Gtk_primary.make_device_manager ~virtwl:t.virtwl bind proxy
-      | Zwp_primary_selection_device_manager_v1.T -> Zwp_primary.make_device_manager ~virtwl:t.virtwl bind proxy
+      | Wl_data_device_manager.T -> make_data_device_manager ~xwayland bind proxy
+      | Gtk_primary_selection_device_manager.T -> Gtk_primary.make_device_manager bind proxy
+      | Zwp_primary_selection_device_manager_v1.T -> Zwp_primary.make_device_manager bind proxy
       | Xdg_wm_base.T -> make_xdg_wm_base ~xwayland ~tag:t.config.tag bind proxy
       | Zxdg_output_manager_v1.T -> make_zxdg_output_manager_v1 ~xwayland bind proxy
       | Org_kde_kwin_server_decoration_manager.T -> make_kde_decoration_manager bind proxy
@@ -1214,23 +1217,20 @@ let make_registry ~xwayland t reg =
       C.Wl_registry.global reg ~name:(Int32.of_int name) ~interface:M.interface ~version
     )
 
-let create (config : Config.t) =
-  let* (host_transport, virtwl) =
-    match Sys.getenv_opt "WAYLAND_DISPLAY" with
-    | (None | Some "") when Sys.file_exists virtwl_dev ->
-      Log.info (fun f -> f "Connecting to %S" virtwl_dev);
-      let fd = Unix.(openfile virtwl_dev [O_RDWR; O_CLOEXEC] 0x600) in
-      let virtwl = Wayland_virtwl.of_fd fd in
-      let host_transport = Wayland_virtwl.new_context virtwl in
-      Lwt.return ((host_transport :> transport), Some virtwl)
-    | _ ->
+let create ?virtio_gpu (config : Config.t) =
+  let* host_transport =
+    match virtio_gpu with
+    | Some virtio_gpu ->
+      let+ host_transport = Virtio_gpu.connect_wayland virtio_gpu in
+      (host_transport :> transport)
+    | None ->
       let+ host_transport = Wayland.Unix_transport.connect () in
-      (host_transport :> transport), None
+      (host_transport :> transport)
   in
   let host_display, host_closed = Wayland.Client.connect ~trace:(module Trace.Host) host_transport in
   let* host_registry = Wayland.Registry.of_display host_display in
   Lwt.return {
-    virtwl;
+    virtio_gpu;
     host_transport;
     host_closed;
     host_display;
@@ -1279,7 +1279,6 @@ let accept ?xwayland t client =
   Lwt.return_unit
 
 let registry t = t.host_registry
-let virtwl t = t.virtwl
 let last_serial t = t.last_serial
 
 let set_from_host_paused t = Wayland.Client.set_paused t.host_display
