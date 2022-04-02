@@ -17,7 +17,7 @@ let wayland_transport dev fd : #Wayland.S.transport =
     val mutable pending = Cstruct.empty
 
     method send data fds =
-      Dev.send dev data fds;
+      if up then Dev.send dev data fds;
       Lwt.return_unit
 
     method recv result_buf =
@@ -43,11 +43,14 @@ let wayland_transport dev fd : #Wayland.S.transport =
           loop ()
         ) else Lwt.return []
       in
-      (* Return as much of [pending] as we can *)
-      let len = min (Cstruct.length result_buf) (Cstruct.length pending) in
-      Cstruct.blit pending 0 result_buf 0 len;
-      pending <- Cstruct.shift pending len;
-      Lwt.return (len, fds)
+      if Dev.is_closed dev then Lwt.return (0, fds)
+      else (
+        (* Return as much of [pending] as we can *)
+        let len = min (Cstruct.length result_buf) (Cstruct.length pending) in
+        Cstruct.blit pending 0 result_buf 0 len;
+        pending <- Cstruct.shift pending len;
+        Lwt.return (len, fds)
+      )
 
     (* The ioctl interface doesn't seem to have shutdown, so try close instead: *)
     method shutdown =

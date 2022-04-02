@@ -19,8 +19,6 @@
 #include <xf86drm.h>
 #include "virtgpu_drm.h"
 
-extern value caml_unix_mapped_alloc(int, int, void *, intnat *);	/* XXX: Is this private? */
-
 #define Version_val(v) *((drmVersion**)Data_custom_val(v))
 
 static void finalize_version(value v) {
@@ -99,26 +97,6 @@ CAMLprim value ocaml_drm_map(value v_fd, value v_handle) {
     unix_error(errno, "DRM_IOCTL_VIRTGPU_MAP", Nothing);
   }
   CAMLreturn(caml_copy_int64(map.offset));
-}
-
-/* Simplified version of the stdlib's map_file that doesn't try to call fstat or ftruncate. */
-CAMLprim value ocaml_safe_map_file(value vfd, value vkind, value vstart, value vsize)
-{
-  int fd, flags;
-  intnat dim[1] = { Long_val(vsize) };
-  uintnat array_size;
-  void *addr = NULL;
-
-  fd = Int_val(vfd);
-  flags = Caml_ba_kind_val(vkind) | CAML_BA_C_LAYOUT;
-  if (dim[0] < 0)
-    caml_invalid_argument("safe_map_file: negative dimension");
-  array_size = dim[0] * caml_ba_element_size[flags & CAML_BA_KIND_MASK];
-  if (array_size > 0)
-    addr = mmap(NULL, array_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, File_offset_val(vstart));
-  if (addr == (void *) MAP_FAILED) uerror("map_file", Nothing);
-  /* Build and return the OCaml bigarray */
-  return caml_unix_mapped_alloc(flags, 1, addr, dim);
 }
 
 static void *cstruct_start(value v_cstruct) {
@@ -220,4 +198,115 @@ CAMLprim value ocaml_close_gem_handle(value v_fd, value v_gem_handle) {
     unix_error(errno, "DRM_IOCTL_GEM_CLOSE", Nothing);
   }
   CAMLreturn(Val_unit);
+}
+
+/* Memory-mapped files.
+ *
+ * This is based on [Unix.map_file], but:
+ * 1. We don't try to extend the file's size (this fails for device files).
+ * 2. We allow it to be manually unmapped.
+ */
+
+static void caml_ba_unmap_file2(void * addr, uintnat len)
+{
+  uintnat page = sysconf(_SC_PAGESIZE);
+  uintnat delta = (uintnat) addr % page;
+  if (len == 0) return;         /* PR#5463 */
+  addr = (void *)((uintnat)addr - delta);
+  len  = len + delta;
+  munmap(addr, len);
+}
+
+static void caml_ba_mapped_finalize2(value v)
+{
+  struct caml_ba_array * b = Caml_ba_array_val(v);
+  if ((b->flags & CAML_BA_MANAGED_MASK) == CAML_BA_MAPPED_FILE) {
+    if (b->proxy == NULL) {
+      // printf("proxy is NULL: unmap\n");
+      caml_ba_unmap_file2(b->data, caml_ba_byte_size(b));
+    } else {
+      if (-- b->proxy->refcount == 0) {
+	// printf("refcount is 0: unmap\n");
+	caml_ba_unmap_file2(b->proxy->data, b->proxy->size);
+	free(b->proxy);
+      } else {
+	// printf("non-zero refcount\n");
+      }
+    }
+  } else {
+    // printf("Already unmapped manually\n");
+  }
+}
+
+static struct custom_operations caml_ba_mapped_ops2 = {
+  "_bigarray",
+  caml_ba_mapped_finalize2,
+  caml_ba_compare,
+  caml_ba_hash,
+  caml_ba_serialize,
+  caml_ba_deserialize,
+  custom_compare_ext_default,
+  custom_fixed_length_default
+};
+
+static value caml_unix_mapped_alloc2(int flags, int num_dims, void * data, intnat * dim)
+{
+  uintnat asize;
+  int i;
+  value res;
+  struct caml_ba_array * b;
+  intnat dimcopy[CAML_BA_MAX_NUM_DIMS];
+
+  CAMLassert(num_dims >= 0 && num_dims <= CAML_BA_MAX_NUM_DIMS);
+  CAMLassert((flags & CAML_BA_KIND_MASK) <= CAML_BA_CHAR);
+  for (i = 0; i < num_dims; i++) dimcopy[i] = dim[i];
+  asize = SIZEOF_BA_ARRAY + num_dims * sizeof(intnat);
+  res = caml_alloc_custom(&caml_ba_mapped_ops2, asize, 0, 1);
+  b = Caml_ba_array_val(res);
+  b->data = data;
+  b->num_dims = num_dims;
+  b->flags = flags | CAML_BA_MAPPED_FILE;
+  b->proxy = NULL;
+  for (i = 0; i < num_dims; i++) b->dim[i] = dimcopy[i];
+  return res;
+}
+
+/* Simplified version of the stdlib's map_file that doesn't try to call fstat or ftruncate. */
+CAMLprim value ocaml_safe_map_file(value vfd, value vkind, value vstart, value vsize)
+{
+  int fd, flags;
+  intnat dim[1] = { Long_val(vsize) };
+  uintnat array_size;
+  void *addr = NULL;
+
+  fd = Int_val(vfd);
+  flags = Caml_ba_kind_val(vkind) | CAML_BA_C_LAYOUT;
+  if (dim[0] < 0)
+    caml_invalid_argument("safe_map_file: negative dimension");
+  array_size = dim[0] * caml_ba_element_size[flags & CAML_BA_KIND_MASK];
+  if (array_size > 0)
+    addr = mmap(NULL, array_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, File_offset_val(vstart));
+  if (addr == (void *) MAP_FAILED) uerror("map_file", Nothing);
+  /* Build and return the OCaml bigarray */
+  return caml_unix_mapped_alloc2(flags, 1, addr, dim);
+}
+
+CAMLprim void ocaml_ba_unmap(value v)
+{
+  struct caml_ba_array * b = Caml_ba_array_val(v);
+  int i;
+
+  /* Free data if we're the last user, or decr ref count if not */
+  caml_ba_mapped_finalize2(v);
+
+  /* Prevent later GC or free from doing anything more.
+     Might need a lock here with multicore?
+     This is best-efforts anyway, as the compiler is allowed to assume
+     bigarrays don't resize when optimising. */
+  b->flags = (b->flags & ~CAML_BA_MANAGED_MASK) | CAML_BA_EXTERNAL;
+  /* Disallow all access via this bigarray */
+  for (i = 0; i < b->num_dims; i++) b->dim[i] = Long_val(0);
+  /* Tidy up (and let C users know that the data is gone). */
+  b->data = NULL;
+  b->proxy = NULL;
 }
