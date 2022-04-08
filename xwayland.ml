@@ -583,6 +583,8 @@ let init_toplevel t ~x11 ~xdg_surface ~info ~paired window =
             )
         )
 
+      method on_configure_bounds _ ~width:_ ~height:_ = ()
+
       method on_close _ =
         Lwt.async (fun () ->
             let* x11 = t.x11 in

@@ -736,6 +736,7 @@ let make_toplevel ~tag ~host_toplevel c =
       inherit [_] H.Xdg_toplevel.v1
       method on_close _ = C.Xdg_toplevel.close c
       method on_configure _ = C.Xdg_toplevel.configure c
+      method on_configure_bounds _ = C.Xdg_toplevel.configure_bounds c
     end
   in
   let user_data = client_data (Toplevel h) in

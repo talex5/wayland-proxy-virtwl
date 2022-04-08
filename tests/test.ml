@@ -111,6 +111,7 @@ let () =
         method on_configure _ ~width ~height ~states:_ =
           t.width <- if width = 0l then 640 else Int32.to_int width;
           t.height <- if height = 0l then 480 else Int32.to_int height
+        method on_configure_bounds _ ~width:_ ~height:_ = ()
       end in
     Xdg_toplevel.set_title toplevel ~title:"virtwl-proxy";
     Wl_surface.commit surface;
