@@ -4,12 +4,18 @@ open Types
 
 type pipe = Lwt_io.output Lwt_io.channel
 
+type image_template = {
+  template_id : Res_handle.t;
+  host_size : int64;
+}
+
 type 'a t = {
   fd : Lwt_unix.file_descr;
   ring_handle : gem_handle;
   ring : Cstruct.t;
   mutable pipe_of_id : pipe Res_handle.Map.t;
   mutable last_resource_id : Res_handle.t;
+  mutable alloc_cache : (int, image_template) Hashtbl.t;
 } constraint 'a = [< `Wayland | `Alloc ]
 
 let get_dev t =
@@ -77,23 +83,36 @@ let of_fd fd =
       ring_handle; ring = Cstruct.of_bigarray ring;
       pipe_of_id = Res_handle.Map.empty;
       last_resource_id = Res_handle.init;
+      alloc_cache = Hashtbl.create 100;
     }
   )
 
+(* Each time we query crosvm, it allocates a new resource which is never freed (while the device is open).
+   So cache every response. *)
+let query_image t ~size =
+  match Hashtbl.find_opt t.alloc_cache size with
+  | Some x -> x
+  | None ->
+    let cs = Cross_domain_image_requirements.create
+        ~linear:true
+        ~scanout:true
+        ~width:(Int32.of_int size)
+        ~height:Int32.one
+        ~drm_format:Drm_format.r8
+    in
+    let dev = get_dev t in
+    drm_exec_buffer dev cs ~ring:`Query ~handles:[| t.ring_handle |];
+    drm_wait dev t.ring_handle;
+    Cross_domain_image_requirements.parse t.ring @@ fun ~strides:_ ~offsets:_ ~host_size ~blob_id ->
+    let cached = { host_size; template_id = blob_id } in
+    Hashtbl.add t.alloc_cache size cached;
+    cached
+
 let alloc t ~size =
-  let cs = Cross_domain_image_requirements.create
-      ~linear:true
-      ~scanout:true
-      ~width:(Int32.of_int size)
-      ~height:Int32.one
-      ~drm_format:Drm_format.r8
-  in
   let dev = get_dev t in
-  drm_exec_buffer dev cs ~ring:`Query ~handles:[| t.ring_handle |];
-  drm_wait dev t.ring_handle;
-  Cross_domain_image_requirements.parse t.ring @@ fun ~strides:_ ~offsets:_ ~host_size ~blob_id ->
+  let details = query_image t ~size in 
   (* Fmt.pr "Strides = %ld, offsets = %ld, host_size = %Ld, blob_id = %Ld@." _strides _offsets host_size blob_id; *)
-  let bo_handle, _ = create_blob dev (`Host3D blob_id) ~size:host_size ~mappable:true ~shareable:true in
+  let bo_handle, _ = create_blob dev (`Host3D details.template_id) ~size:details.host_size ~mappable:true ~shareable:true in
   let fd = drm_prime_handle_to_fd dev bo_handle in
   close_gem_handle dev bo_handle;
   fd

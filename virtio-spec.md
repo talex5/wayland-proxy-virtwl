@@ -80,6 +80,11 @@ Use `DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB` with the `blob_id` from the query
 to create a new blob. Oddly, the blob_id is not the ID of the blob.
 It seems more like a template that can be used to create blobs, which are returned as gem handles.
 
+Note that these template resources are never freed (until the device itself is closed),
+and crosvm creates a fresh one for every query.
+To avoid crosvm constantly using more memory,
+it's best to cache the results and reuse for images with the same size.
+
 ### Pipes
 
 The protocol allows a sender to send a writable pipe, which is sufficient for Wayland data transfers (selection, clipboard, etc).
