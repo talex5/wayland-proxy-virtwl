@@ -4,6 +4,8 @@ open Wayland.Wayland_client
 open Lwt.Syntax
 open Lwt.Infix
 
+type image_data = (int32, Bigarray.int32_elt, Bigarray.c_layout) Bigarray.Array2.t
+
 type t = {
   shm : [`V1] Wl_shm.t;
   surface : [`V4] Wl_surface.t;
@@ -12,6 +14,7 @@ type t = {
   mutable width : int;
   mutable height : int;
   mutable scroll : int;
+  mutable recycled_image : ([`V1] Wl_buffer.t * image_data) option;   (* A free buffer of size [width, height] *)
 }
 
 let with_memory_fd gpu ~size f =
@@ -21,33 +24,53 @@ let with_memory_fd gpu ~size f =
     (fun () -> f fd)
     ~finally:(fun () -> Unix.close fd)
 
+let clear_recycle t =
+  match t.recycled_image with
+  | None -> ()
+  | Some (buffer, _) ->
+    Wl_buffer.destroy buffer;
+    t.recycled_image <- None
+
 (* Draw the content to [t.surface]. *)
 let draw_frame t =
-  let stride = t.width * 4 in
-  let size = t.height * stride in
-  let pool, data = with_memory_fd t.gpu ~size (fun fd ->
-      let pool = Wl_shm.create_pool t.shm (new Wl_shm_pool.v1) ~fd ~size:(Int32.of_int size) in
-      let ba = Virtio_gpu.Utils.safe_map_file fd ~kind:Bigarray.Int32 ~len:(t.height * t.width) in
-      let ba2 = Bigarray.reshape_2 (Bigarray.genarray_of_array1 ba) t.height t.width in
-      pool, ba2
-    ) in
-  let buffer =
-    Wl_shm_pool.create_buffer pool
-      ~offset:0l
-      ~width:(Int32.of_int t.width)
-      ~height:(Int32.of_int t.height)
-      ~stride:(Int32.of_int stride)
-      ~format:Wl_shm.Format.Xrgb8888
-    @@ object
-      inherit [_] Wl_buffer.v1
-      method on_release = Wl_buffer.destroy
-    end
+  let width = t.width in
+  let height = t.height in
+  let stride = width * 4 in
+  let size = height * stride in
+  let buffer, data =
+    match t.recycled_image with
+    | Some saved -> t.recycled_image <- None; saved
+    | None ->
+      Logs.info (fun f -> f "Allocate a new %dx%d buffer" width height);
+      let pool, data = with_memory_fd t.gpu ~size (fun fd ->
+          let pool = Wl_shm.create_pool t.shm (new Wl_shm_pool.v1) ~fd ~size:(Int32.of_int size) in
+          let ba = Virtio_gpu.Utils.safe_map_file fd ~kind:Bigarray.Int32 ~len:(height * width) in
+          let ba2 = Bigarray.reshape_2 (Bigarray.genarray_of_array1 ba) height width in
+          pool, ba2
+        ) in
+      let buffer =
+        Wl_shm_pool.create_buffer pool
+          ~offset:0l
+          ~width:(Int32.of_int width)
+          ~height:(Int32.of_int height)
+          ~stride:(Int32.of_int stride)
+          ~format:Wl_shm.Format.Xrgb8888
+        @@ object
+          inherit [_] Wl_buffer.v1
+          method on_release buffer =
+            if t.width = width && t.height = height then (
+              clear_recycle t;
+              t.recycled_image <- Some (buffer, data)
+            ) else Wl_buffer.destroy buffer
+        end
+      in
+      Wl_shm_pool.destroy pool;
+      (buffer, data)
   in
-  Wl_shm_pool.destroy pool;
   Wl_surface.attach t.surface ~buffer:(Some buffer) ~x:0l ~y:0l;
   let scroll = t.scroll in
-  for row = 0 to t.height - 1 do
-    for col = 0 to t.width - 1 do
+  for row = 0 to height - 1 do
+    for col = 0 to width - 1 do
       if (col + (row + scroll) land -16) land 31 < 16 then
         data.{row, col} <- 0xFF666666l
       else
@@ -105,7 +128,7 @@ let () =
         method on_enter _ ~output:_ = ()
         method on_leave _ ~output:_ = ()
       end in
-    let t = { gpu; shm; surface; scroll = 0; width = 0; height = 0; fg = 0xFFEEEEEEl } in
+    let t = { gpu; shm; surface; scroll = 0; width = 0; height = 0; fg = 0xFFEEEEEEl; recycled_image = None } in
     let closed, set_closed = Lwt.wait () in
     let configured, set_configured = Lwt.wait () in
     let xdg_surface = Xdg_wm_base.get_xdg_surface xdg_wm_base ~surface @@ object
@@ -118,8 +141,13 @@ let () =
         inherit [_] Xdg_toplevel.v1
         method on_close _ = Lwt.wakeup set_closed ()
         method on_configure _ ~width ~height ~states:_ =
-          t.width <- if width = 0l then 640 else Int32.to_int width;
-          t.height <- if height = 0l then 480 else Int32.to_int height
+          let width = if width = 0l then 640 else Int32.to_int width in
+          let height = if height = 0l then 480 else Int32.to_int height in
+          if width <> t.width || height <> t.height then (
+            clear_recycle t;
+            t.width <- width;
+            t.height <- height;
+          )
         method on_configure_bounds _ ~width:_ ~height:_ = ()
       end in
     Xdg_toplevel.set_title toplevel ~title:"virtio-gpu-proxy";
@@ -140,5 +168,6 @@ let () =
         closed;
       ]
     in
+    clear_recycle t;
     transport#shutdown
   end
