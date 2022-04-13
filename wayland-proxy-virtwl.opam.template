@@ -1,3 +1,8 @@
 depexts: [
   ["linux-headers"] {os-distribution = "alpine"}
+  ["libdrm-dev"] {os-family = "debian"}
+  ["libdrm-dev"] {os-distribution = "alpine"}
+  ["libdrm-devel"] {os-distribution = "fedora"}
+  ["libdrm-devel"] {os-family = "suse"}
+  ["libdrm"] {os-distribution = "nixos"}
 ]

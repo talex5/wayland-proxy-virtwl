@@ -2,20 +2,21 @@ open Wayland_protocols.Xdg_shell_client
 open Wayland.Wayland_client
 
 open Lwt.Syntax
+open Lwt.Infix
 
 type t = {
   shm : [`V1] Wl_shm.t;
   surface : [`V4] Wl_surface.t;
-  virtwl : Wayland_virtwl.t;
+  gpu : Virtio_gpu.t;
   mutable fg : int32;
   mutable width : int;
   mutable height : int;
   mutable scroll : int;
 }
 
-let with_memory_fd t ~size f =
-  let fd = Wayland_virtwl.alloc t ~size in
-  Fmt.pr "Got memory FD: %d@." (Obj.magic fd : int);
+let with_memory_fd gpu ~size f =
+  let fd = Virtio_gpu.alloc gpu ~size in
+  (* Fmt.pr "Got memory FD: %d@." (Obj.magic fd : int); *)
   Fun.protect
     (fun () -> f fd)
     ~finally:(fun () -> Unix.close fd)
@@ -24,10 +25,11 @@ let with_memory_fd t ~size f =
 let draw_frame t =
   let stride = t.width * 4 in
   let size = t.height * stride in
-  let pool, data = with_memory_fd t.virtwl ~size (fun fd ->
+  let pool, data = with_memory_fd t.gpu ~size (fun fd ->
       let pool = Wl_shm.create_pool t.shm (new Wl_shm_pool.v1) ~fd ~size:(Int32.of_int size) in
-      let ba = Wayland_virtwl.map_file fd Bigarray.Int32 ~n_elements:(t.height * t.width) in
-      pool, Bigarray.reshape_2 ba t.height t.width
+      let ba = Virtio_gpu.Utils.safe_map_file fd ~kind:Bigarray.Int32 ~len:(t.height * t.width) in
+      let ba2 = Bigarray.reshape_2 (Bigarray.genarray_of_array1 ba) t.height t.width in
+      pool, ba2
     ) in
   let buffer =
     Wl_shm_pool.create_buffer pool
@@ -55,17 +57,24 @@ let draw_frame t =
   Wl_surface.damage t.surface ~x:0l ~y:0l ~width:Int32.max_int ~height:Int32.max_int;
   Wl_surface.commit t.surface
 
+let or_die = function
+  | Ok x -> x
+  | Error (`Msg m) -> output_string stderr (m ^ "\n"); flush stderr; exit 1
+
 let () =
   Logs.set_reporter (Logs_fmt.reporter ());
   Logs.(set_level (Some Info));
   Lwt_main.run @@ begin
-    let fd = Unix.(openfile "/dev/wl0" [O_RDWR; O_CLOEXEC] 0x600) in
-    let virtwl = Wayland_virtwl.of_fd fd in
-    let transport = Wayland_virtwl.new_context virtwl in
+    let* gpu = Virtio_gpu.find_device () >|= or_die in
+    let* transport = Virtio_gpu.connect_wayland gpu in
     let display, conn_closed = Wayland.Client.connect transport in
-    Lwt.on_success conn_closed (function
-        | Ok () -> ()
-        | Error ex -> raise ex
+    Lwt.on_success conn_closed (fun r ->
+        Lwt.async (fun () ->
+            let+ () = Virtio_gpu.close gpu in
+            match r with
+            | Ok () -> ()
+            | Error ex -> raise ex
+          )
       );
     let* r = Wayland.Registry.of_display display in
     let comp = Wayland.Registry.bind r @@ new Wl_compositor.v4 in
@@ -96,7 +105,7 @@ let () =
         method on_enter _ ~output:_ = ()
         method on_leave _ ~output:_ = ()
       end in
-    let t = { virtwl; shm; surface; scroll = 0; width = 0; height = 0; fg = 0xFFEEEEEEl } in
+    let t = { gpu; shm; surface; scroll = 0; width = 0; height = 0; fg = 0xFFEEEEEEl } in
     let closed, set_closed = Lwt.wait () in
     let configured, set_configured = Lwt.wait () in
     let xdg_surface = Xdg_wm_base.get_xdg_surface xdg_wm_base ~surface @@ object
@@ -113,16 +122,23 @@ let () =
           t.height <- if height = 0l then 480 else Int32.to_int height
         method on_configure_bounds _ ~width:_ ~height:_ = ()
       end in
-    Xdg_toplevel.set_title toplevel ~title:"virtwl-proxy";
+    Xdg_toplevel.set_title toplevel ~title:"virtio-gpu-proxy";
     Wl_surface.commit surface;
     let* () = configured in
+    let trigger = Lwt_condition.create () in
     let rec animate () =
-      let _frame = Wl_surface.frame surface (Wayland.callback ready) in
-      draw_frame t
-    and ready _ =
+      let next = Lwt_condition.wait trigger in
+      let _frame = Wl_surface.frame surface (Wayland.callback (fun _ -> Lwt_condition.broadcast trigger ())) in
+      draw_frame t;
+      let* () = next in
       t.scroll <- t.scroll + 1;
       animate ()
     in
-    animate ();
-    closed
+    let* () =
+      Lwt.pick [
+        animate ();
+        closed;
+      ]
+    in
+    transport#shutdown
   end

@@ -5,7 +5,7 @@ Features:
 
 - It can act as an X11 window manager, allowing Xwayland to work without needing support in the host compositor.
 
-- It can run inside a VM, using the `virtwl` Linux kernel module to proxy to the host's compositor.
+- It can run inside a VM, using virtio-gpu to proxy to the host's compositor.
   This allows applications running in VMs to be used as if they were running on the host.
 
 - It can also be used to make changes to protocol messages.
@@ -37,19 +37,71 @@ I use the following systemd file to run the proxy
 Description=Wayland-proxy-virtwl
 
 [Service]
-ExecStart=/path/to/wayland-proxy-virtwl --tag="[my-vm] " --wayland-display wayland-0 --x-display=0 --xrdb Xft.dpi:150
+ExecStart=/path/to/wayland-proxy-virtwl --virtio-gpu --tag="[my-vm] " --wayland-display wayland-0 --x-display=0 --xrdb Xft.dpi:150
 
 [Install]
 WantedBy=default.target
 ```
 
-## virtwl support
+## virtio-gpu support
 
-If `$WAYLAND_DISPLAY` is not set and `/dev/wl0` is present, the proxy will use that to connect to the host's compositor.
-Since regular guest memory cannot be shared with the host, it allocates a shadow buffer from the host and copies the frame data into that.
+If `--virtio-gpu` is passed then, rather than connecting to a local Wayland compositor,
+the proxy will search `/dev/dri/` for a virtio-gpu device and use that to connect to the compositor on the host.
+
+Note: the proxy previously used the virtwl protocol, but virtio-gpu has now replaced it.
+
+### crosvm setup
+
+For this to work you will need to be using crosvm 99.14468.0.0-rc1 or later on the host.
+Crosvm must be compiled with the `virgl_renderer` feature enabled,
+and run with the `--gpu` option (no extra arguments to the option are needed).
+
+Annoyingly, this also causes a console window to appear.
+I didn't find a way to turn this off.
+It probably also exposes some extra attack surface by allowing 3D graphics,
+even though we don't necessarily care about that (needs investigation).
+
+If `io_uring` support is available on the host, then crosvm will try to use that.
+This support is buggy and crashes after resume from suspend with
+"An error with a uring source: URing::enter: Failed to enter io uring: 4".
+Run crosvm with `ulimit -l 0` to use the older, working system.
+
+But default, crosvm runs the virtio-gpu driver in a sandbox.
+At least on NixOS, this will cause it to crash when it tries to load a `.so` file it needs:
+```
+Stack trace of thread 2:
+#0  0x00007fa5fd0915f6 abort (libc.so.6 + 0x265f6)
+#1  0x00007fa5fcfc6bfd get_dlopen_handle.part.0 (libepoxy.so.0 + 0xc7bfd)
+#2  0x00007fa5fcfc7366 epoxy_egl_dlsym (libepoxy.so.0 + 0xc8366)
+#3  0x00007fa5fcfbf870 egl_single_resolver (libepoxy.so.0 + 0xc0870)
+#4  0x00007fa5fcfc1d2f epoxy_eglQueryString_global_rewrite_ptr
+(libepoxy.so.0 + 0xc2d2f)
+#5  0x0000561703e72ca1 virgl_egl_init (crosvm + 0x3deca1)
+#6  0x0000561703e72221 vrend_winsys_init (crosvm + 0x3de221)
+#7  0x0000561703e380dc virgl_renderer_init (crosvm + 0x3a40dc)
+#8  0x0000561703e35e44
+```
+To avoid this, edit `create_gpu_device` to use `let jail = None;`.
+That runs this driver without a jail, but still runs other devices inside jails
+(and e.g. the shared directories driver doesn't work without a jail).
+
+### Guest setup
+
+Support for virtio-gpu contexts was added in Linux 5.16.
+You will need to load (or compile in) the `virtio_gpu` kernel module.
+On success, you should see these kernel messages (with `+context_init`):
+```
+[drm] features: +virgl -edid +resource_blob +host_visible
+[drm] features: +context_init
+```
+You should find you now have a `/dev/dri` directory with some device files
+(and maybe some debug files in `/sys/kernel/debug/dri`).
+
+### Guest acceleration
+
+Since regular guest memory cannot be shared with the host,
+the proxy allocates a shadow buffer from the host and copies the frame data into that.
 Wayland can also use graphics memory directly, which should avoid the copy, but this is not yet supported.
-
-See https://alyssa.is/using-virtio-wl/ for some background.
 
 ## Xwayland support
 
@@ -124,11 +176,6 @@ cat ~/wayland.log
 
 This is useful if an application is misbehaving and you want to check its recent interactions.
 
-## Using virtwl directly
-
-`tests/test.ml` is a simple test application that uses the virtwl kernel interface directly
-(without the proxy), avoiding any copying.
-
 ## Hacking
 
 Execution starts in `main.ml`,
@@ -188,8 +235,17 @@ When calling the host compositor, we must pass the corresponding host-side objec
 `to_host` and `to_client` perform these conversions.
 Objects that require conversion in this way must provide a `user_data` method to get their peer.
 
-Objects that need to do special things when running under virtwl take an extra `virtwl` option with a connection to `/dev/wl0`.
+Objects that need to do special things when running under virtio-gpu take an extra `virtio_gpu` option,
+which allows allocating image buffers on the host.
 Objects that interact with Xwayland take an `xwayland` option with hooks for that.
+
+### virtio-gpu cross-domain protocol
+
+I couldn't find any documentation on the protocol,
+but [virtio-spec.md](./virtio-spec.md) contains my guesses about how it's supposed to work.
+
+`tests/test.ml` is a simple test application that uses the virtio-gpu kernel interface directly
+(without the proxy), avoiding any copying.
 
 ### Updating a protocol
 
@@ -211,7 +267,7 @@ To add support for a newer version of protocol:
 3. Extend `relay.ml`'s `registry` function: list the new interface and handle it in `on_bind`.
 4. You can mostly just follow the compiler errors to implement it, copying the pattern of the other objects.
 
-If your interface needs to do things with virtwl, it's probably easiest to get it working on the host, without virtwl, first.
+If your interface needs to do things with virtio-gpu, it's probably easiest to get it working on the host, without virtio-gpu, first.
 
 ## TODO
 

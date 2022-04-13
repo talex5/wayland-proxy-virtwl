@@ -136,7 +136,6 @@ module Selection = struct
     set_selection_window : X11.Window.t Lwt.u;
     clipboard_window : X11.Window.t Lwt.t;
     set_clipboard_window : X11.Window.t Lwt.u;
-    virtwl : Wayland_virtwl.t option;
     relay : Relay.t;
 
     (* When we request an X11 selection, we add the callback for the response here. *)
@@ -241,21 +240,12 @@ module Selection = struct
         | Some (receive, targets) ->
           let* mime_type, reply_target = X11.Atom.get_name x11 target >|= mime_type_of_target ~targets in
           if List.mem mime_type targets then (
-            let host_fd, need_close_host, r =
-              match t.virtwl with
-              | Some virtwl ->
-                let host_fd = Wayland_virtwl.pipe_read virtwl in
-                let r = Lwt_io.(of_unix_fd ~mode:input) host_fd in    (* Will close [host_fd] *)
-                (host_fd, false, r)
-              | None ->
-                let r, w = Unix.pipe () in
-                let r = Lwt_io.(of_unix_fd ~mode:input) r in    (* Will close [r] *)
-                (w, true, r)
-            in
+            let r, w = Unix.pipe () in
+            let r = Lwt_io.(of_unix_fd ~mode:input) r in    (* Will close [r] *)
             Lwt.try_bind
               (fun () ->
-                 receive ~mime_type ~fd:host_fd;        (* Tell Wayland app to write to [host_fd]. *)
-                 if need_close_host then Unix.close host_fd;
+                 receive ~mime_type ~fd:w;        (* Tell Wayland app to write to [w]. *)
+                 Unix.close w;
                  Lwt_io.read r
               )
               (fun data ->
@@ -479,7 +469,7 @@ module Selection = struct
     | _ ->
       failwith "Expected exactly one X11 root window!"
 
-  let create ~relay ~seat ~x11 ~virtwl ~registry =
+  let create ~relay ~seat ~x11 ~registry =
     let clipboard_mgr = Wayland.Registry.bind registry @@ new Clipboard_mgr.v1 in
     let selection_window, set_selection_window = Lwt.wait () in
     let clipboard_window, set_clipboard_window = Lwt.wait () in
@@ -497,7 +487,6 @@ module Selection = struct
     let clipboard_device = Clipboard_mgr.get_data_device clipboard_mgr ~seat @@ clipboard_device ~wayland_clipboard_offer in
     {
       x11;
-      virtwl;
       relay;
       awaiting_notify = Hashtbl.create 1;
       (* Primary: *)
@@ -1016,10 +1005,9 @@ let monitor name thread =
 
 (* We've just spawned an Xwayland process.
    Talk to it using the Wayland and X11 protocols. *)
-let handle_xwayland ~config ~local_wayland ~local_wm_socket =
+let handle_xwayland ~config ~virtio_gpu ~local_wayland ~local_wm_socket =
   let x11 = X11.Display.connect local_wm_socket in
-  let* relay = Relay.create config in
-  let virtwl = Relay.virtwl relay in
+  let* relay = Relay.create ?virtio_gpu config in
   let registry = Relay.registry relay in
   let wm_base = Wayland.Registry.bind registry @@ object
       inherit [_] Xdg_wm_base.v1
@@ -1038,7 +1026,7 @@ let handle_xwayland ~config ~local_wayland ~local_wm_socket =
       Log.warn (fun f -> f "Can't get decoration manager: %a" Fmt.exn ex);
       None
   in
-  let selection = Selection.create ~seat ~x11 ~virtwl ~registry ~relay in
+  let selection = Selection.create ~seat ~x11 ~registry ~relay in
   let t = {
     relay;
     x11;
@@ -1112,7 +1100,7 @@ let with_socket_pair fn =
        | Closed | Aborted _ -> Lwt.return_unit
     )
 
-let spawn_and_run_xwayland ~config ~display listen_socket =
+let spawn_and_run_xwayland ~config ~virtio_gpu ~display listen_socket =
   (* Set up connections between us and Xwayland: *)
   with_socket_pair @@ fun ~local:local_wm_socket ~remote:remote_wm_socket ->
   with_socket_pair @@ fun ~local:local_wayland ~remote:remote_wayland ->
@@ -1129,7 +1117,7 @@ let spawn_and_run_xwayland ~config ~display listen_socket =
          let* () = Lwt_unix.close remote_wayland in
          Lwt.catch
            (fun () ->
-             handle_xwayland ~config ~local_wayland ~local_wm_socket
+             handle_xwayland ~config ~virtio_gpu ~local_wayland ~local_wm_socket
            )
            (fun ex ->
               Log.warn (fun f -> f "X11 WM failed: %a" Fmt.exn ex);
@@ -1142,13 +1130,13 @@ let spawn_and_run_xwayland ~config ~display listen_socket =
          Lwt.return_unit
       )
 
-let listen ~config ~display listen_socket =
+let listen ~config ~virtio_gpu ~display listen_socket =
   let rec aux () =
     Log.info (fun f -> f "Waiting for X11 clients");
     let* () = Lwt_unix.wait_read listen_socket in
     Log.info (fun f -> f "X client detected - launching %S..." config.Config.xwayland_binary);
     let t0 = Unix.gettimeofday () in
-    let* () = spawn_and_run_xwayland  ~config ~display listen_socket in
+    let* () = spawn_and_run_xwayland ~config ~virtio_gpu ~display listen_socket in
     let delay = min_respawn_time -. (Unix.gettimeofday () -. t0) in
     if delay > 0.0 then (
       Log.info (fun f -> f "Xwayland died too quickly... waiting a bit before retrying...");

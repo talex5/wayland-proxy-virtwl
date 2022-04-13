@@ -6,21 +6,21 @@ let ( let*! ) x f =
   | `Ok x -> f x
   | `Error _ as e -> Lwt.return e
 
-let rec listen ~config socket =
+let rec listen ~config ~virtio_gpu socket =
   let* (client, _addr) = Lwt_unix.accept socket in
   Lwt_unix.set_close_on_exec client;
   Log.info (fun f -> f "New connection");
   Lwt.async (fun () ->
       Lwt.finalize
         (fun () ->
-           let* r = Relay.create config in
+           let* r = Relay.create ?virtio_gpu config in
            Relay.accept r client
         )
         (fun () ->
            Lwt_unix.close client
         )
     );
-  listen ~config socket
+  listen ~config ~virtio_gpu socket
 
 (* Connect to socket at [path] (and then close it), to see if anyone's already listening there. *)
 let is_listening path =
@@ -34,7 +34,7 @@ let is_listening path =
     false
 
 (* Start listening for connections to [wayland_display]. *)
-let listen_wayland ~config wayland_display = 
+let listen_wayland ~config ~virtio_gpu wayland_display = 
   let socket_path = Wayland.Unix_transport.socket_path ~wayland_display () in
   let existing_socket = Sys.file_exists socket_path in
   if existing_socket && is_listening socket_path then (
@@ -46,12 +46,12 @@ let listen_wayland ~config wayland_display =
     Unix.bind listening_socket (Unix.ADDR_UNIX socket_path);
     Unix.listen listening_socket 5;
     Log.info (fun f -> f "Listening on %S for Wayland clients" socket_path);
-    Lwt.async (fun () -> listen ~config (Lwt_unix.of_unix_file_descr listening_socket));
+    Lwt.async (fun () -> listen ~config ~virtio_gpu (Lwt_unix.of_unix_file_descr listening_socket));
     Lwt.return (`Ok ())
   )
 
 (* Start listening for connections to [x_display] and set $DISPLAY. *)
-let listen_x11 ~config x_display = 
+let listen_x11 ~config ~virtio_gpu x_display = 
   let xwayland_listening_socket =
     let path = Printf.sprintf "\x00/tmp/.X11-unix/X%d" x_display in
     let sock = Unix.(socket PF_UNIX SOCK_STREAM 0) in
@@ -61,20 +61,29 @@ let listen_x11 ~config x_display =
     Log.info (fun f -> f "Listening on %S for X clients" path);
     sock
   in
-  Lwt.async (fun () -> Xwayland.listen ~config ~display:x_display (Lwt_unix.of_unix_file_descr xwayland_listening_socket));
+  Lwt.async (fun () -> Xwayland.listen ~config ~virtio_gpu ~display:x_display (Lwt_unix.of_unix_file_descr xwayland_listening_socket));
   Unix.putenv "DISPLAY" (Printf.sprintf ":%d" x_display)
 
 let env_replace k v l =
   let prefix = k ^ "=" in
   (prefix ^ v) :: List.filter (fun x -> not (Config.starts_with ~prefix x)) l
 
-let main setup_tracing wayland_display x_display config args =
+let main setup_tracing use_virtio_gpu wayland_display x_display config args =
   Lwt_main.run begin
+    let* virtio_gpu =
+      if use_virtio_gpu then
+        Virtio_gpu.find_device () >|= function
+        | Ok x -> Some x
+        | Error (`Msg m) ->
+          Fmt.epr "No virtio-gpu device: %s@." m;
+          exit 1
+      else Lwt.return_none
+    in
     let* () = setup_tracing ~wayland_display in
     (* Listen for incoming Wayland client connections: *)
-    let*! () = listen_wayland ~config wayland_display in
+    let*! () = listen_wayland ~config ~virtio_gpu wayland_display in
     (* Listen for incoming X11 client connections, if configured: *)
-    Option.iter (listen_x11 ~config) x_display;
+    Option.iter (listen_x11 ~config ~virtio_gpu) x_display;
     (* Run the application (if any), or just wait (if not): *)
     match args with
     | [] ->
@@ -108,6 +117,13 @@ let wayland_display =
     ~doc:"Name or path of socket to listen on"
     ["wayland-display"]
 
+let virtio_gpu =
+  Arg.value @@
+  Arg.flag @@
+  Arg.info
+    ~doc:"Use virtio-gpu to connect to compositor on host"
+    ["virtio-gpu"]
+
 let args =
   Arg.value @@
   Arg.(pos_all string) [] @@
@@ -117,7 +133,7 @@ let args =
 
 let virtwl_proxy =
   let info = Cmd.info "wayland-proxy-virtwl" in
-  Cmd.v info Term.(ret (const main $ Trace.cmdliner $ wayland_display $ x_display $ Config.cmdliner $ args))
+  Cmd.v info Term.(ret (const main $ Trace.cmdliner $ virtio_gpu $ wayland_display $ x_display $ Config.cmdliner $ args))
 
 let () =
   exit @@ Cmd.eval virtwl_proxy
