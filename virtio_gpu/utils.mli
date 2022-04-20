@@ -8,3 +8,8 @@ val safe_map_file :
     (which fails for special files such as shared buffers). *)
 
 val pp_fd : Unix.file_descr Fmt.t
+
+val unmap : _ Bigarray.Genarray.t -> unit
+(** [unmap ba] immediately unmaps an array previously mapped with {!safe_map_file},
+    without waiting for the garbage collector. You must not access [ba] after this
+    (it will probably give an error if you try, but the compiler may optimise this out). *)

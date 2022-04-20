@@ -29,3 +29,6 @@ val handle_event : [`Wayland] t -> bytes -> [
 
 val close : _ t -> unit Lwt.t
 (** [close t] closes the underlying FD. *)
+
+val is_closed : _ t -> bool
+(** [is_closed t] is [true] after [close t] has been called. *)

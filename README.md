@@ -271,7 +271,6 @@ If your interface needs to do things with virtio-gpu, it's probably easiest to g
 
 ## TODO
 
-- Find alternative to private `caml_unix_mapped_alloc`.
 - Only copy the buffer regions that have changed.
 
 [sommelier]: https://chromium.googlesource.com/chromiumos/platform2/+/main/vm_tools/sommelier/

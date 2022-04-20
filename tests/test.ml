@@ -92,12 +92,9 @@ let () =
     let* transport = Virtio_gpu.connect_wayland gpu in
     let display, conn_closed = Wayland.Client.connect transport in
     Lwt.on_success conn_closed (fun r ->
-        Lwt.async (fun () ->
-            let+ () = Virtio_gpu.close gpu in
-            match r with
-            | Ok () -> ()
-            | Error ex -> raise ex
-          )
+        match r with
+        | Ok () -> ()
+        | Error ex -> raise ex
       );
     let* r = Wayland.Registry.of_display display in
     let comp = Wayland.Registry.bind r @@ new Wl_compositor.v4 in
@@ -169,5 +166,9 @@ let () =
       ]
     in
     clear_recycle t;
-    transport#shutdown
+    let* () = transport#shutdown in
+    let* r = conn_closed in
+    let* () = Virtio_gpu.close gpu in
+    Result.iter_error raise r;
+    Lwt.return_unit
   end

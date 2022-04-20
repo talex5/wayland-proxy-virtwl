@@ -12,14 +12,20 @@ type image_template = {
 type 'a t = {
   fd : Lwt_unix.file_descr;
   ring_handle : gem_handle;
-  ring : Cstruct.t;
+  ring : Cstruct.t;     (* Invalid if [is_closed] *)
   mutable pipe_of_id : pipe Res_handle.Map.t;
   mutable last_resource_id : Res_handle.t;
   mutable alloc_cache : (int, image_template) Hashtbl.t;
 } constraint 'a = [< `Wayland | `Alloc ]
 
+let is_closed t =
+  match Lwt_unix.state t.fd with
+  | Closed | Aborted _ -> true
+  | Opened -> false
+
 let get_dev t =
-  Lwt_unix.unix_file_descr t.fd
+  if is_closed t then failwith "virtio-gpu device has been closed!"
+  else Lwt_unix.unix_file_descr t.fd
 
 type version
 
@@ -220,6 +226,7 @@ module Event = struct
 end
 
 let handle_event t buf =
+  assert (not (is_closed t));
   let got = Bytes.length buf in
   if got < 8 then Fmt.failwith "Expected to read an 8-byte drm_event (got %d bytes)" got;
   assert (Bytes.get_int32_ne buf 0 = Event.v_FENCE_SIGNALED);
@@ -229,4 +236,5 @@ let handle_event t buf =
     ~read_pipe:(fun ~id ~hang_up data -> let+ () = Recv.pipe_host_to_guest t ~id ~hang_up data in `Again)
 
 let close t =
-  Lwt_unix.close t.fd
+  let+ () = Lwt_unix.close t.fd in
+  Utils.unmap (Bigarray.genarray_of_array1 t.ring.buffer)
