@@ -35,6 +35,10 @@ type xwayland_hooks = <
     forward_event:(unit -> unit) ->
     unit;
 
+  on_keyboard_leave : 'v.
+    surface:([< `V1 | `V2 | `V3 | `V4 ] as 'v) H.Wl_surface.t ->
+    unit;
+
   set_ping : (unit -> unit Lwt.t) -> unit;
 
   scale : int32;
@@ -661,7 +665,10 @@ let make_keyboard t ~xwayland ~host_seat c =
 
       method on_leave _ ~serial ~surface =
         update_serial t serial;
-        C.Wl_keyboard.leave c ~serial ~surface:(to_client surface)
+        C.Wl_keyboard.leave c ~serial ~surface:(to_client surface);
+        xwayland |> Option.iter (fun (xwayland : xwayland_hooks) ->
+            xwayland#on_keyboard_leave ~surface
+          )
 
       method on_key _ ~serial ~time ~key ~state =
         update_serial t serial;

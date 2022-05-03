@@ -850,6 +850,24 @@ module Input = struct
           Relay.set_from_host_paused t.xwayland.relay false;
           Lwt.return_unit
         )
+
+  let on_keyboard_leave t ~surface =
+    match Hashtbl.find_opt t.xwayland.of_host_surface (Proxy.id surface) with
+    | None -> Log.warn (fun f -> f "Keyboard left unknown surface %a" Proxy.pp surface)
+    | Some paired ->
+      match t.focus_window with
+      | Some x when x.window = paired.window ->
+        Lwt.async (fun () ->
+          let* x11 = t.xwayland.x11 in
+          t.focus_window <- None;
+          X11.Window.set_input_focus_checked x11 `None ~revert_to:`None ~time:`CurrentTime >>= function
+          | Ok () ->
+            Lwt.return_unit
+          | Error err ->
+            Log.info (fun f -> f "Error removing focus from window: %a" X11.Error.pp_code err);
+            Lwt.return_unit
+          )
+      | _ -> ()
 end
 
 (* Get Xwayland ready to run and become the window manager on each screen
@@ -1046,6 +1064,7 @@ let handle_xwayland ~config ~virtio_gpu ~local_wayland ~local_wm_socket =
   let xwayland = object (_ : Relay.xwayland_hooks)
     method on_pointer_entry = Input.on_pointer_entry input
     method on_keyboard_entry = Input.on_keyboard_entry input
+    method on_keyboard_leave = Input.on_keyboard_leave input
 
     method on_create_surface host_surface client_surface ~set_configured =
       Log.info (fun f -> f "%a created by Xwayland (host=%a)"
