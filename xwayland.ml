@@ -44,6 +44,13 @@ type paired = {
   override_redirect : bool;
 }
 
+type Relay.surface_data += X11 of paired
+
+let paired_of_surface s =
+  match Relay.get_surface_data s with
+  | X11 x -> Some x
+  | _ -> None
+
 let pp_paired f { window; xdg_surface; xdg_role; geometry; override_redirect } =
   Fmt.pf f "%a@%a/%t=%a%s"
     Proxy.pp xdg_surface
@@ -65,7 +72,6 @@ type t = {
   unpaired : (int32, unpaired) Hashtbl.t;         (* Client-side Wayland ID -> details *)
   unpaired_added : unit Lwt_condition.t;          (* Fires when [unpaired] gets a new entry. *)
   paired : (X11.Window.t, paired) Hashtbl.t;      (* X11 ID -> details *)
-  of_host_surface : (int32, paired) Hashtbl.t;    (* Host-side Wayland ID -> details *) 
 
   mutable pointer_surface : paired option;        (* A member of [of_host_surface] *)
   mutable keyboard_surface : paired option;       (* A member of [of_host_surface] *)
@@ -680,7 +686,7 @@ let pair t ~set_configured ~host_surface window =
       override_redirect = info.win_attrs.override_redirect;
     } in
     Hashtbl.add t.paired window paired;
-    Hashtbl.add t.of_host_surface (Wayland.Proxy.id host_surface) paired;
+    Relay.set_surface_data host_surface (X11 paired);
     let fallback_parent = if parent = None then last_event_surface t else parent in
     match info.window_type, fallback_parent with
     | (`Normal | `Dialog), _
@@ -719,14 +725,13 @@ let rec pair_when_ready ~x11 t window wayland_id =
     Lwt.async (fun () -> pair t ~set_configured ~host_surface window);
     Lwt.return_unit
 
-let unpair t ~host_surface paired =
+let unpair t paired =
   begin match paired.xdg_role with
     | `Popup role -> Xdg_popup.destroy role
     | `Toplevel role -> Xdg_toplevel.destroy role
     | `None -> ()
   end;
   Xdg_surface.destroy paired.xdg_surface;
-  Hashtbl.remove t.of_host_surface (Proxy.id host_surface);
   Hashtbl.remove t.paired paired.window;
   begin match t.pointer_surface with
     | Some p when p == paired ->
@@ -808,7 +813,7 @@ module Input = struct
 
   let on_pointer_entry t ~surface ~forward_event =
     (* Fmt.pr "Entry: %a@." Relay.dump t.xwayland.relay; *)
-    let paired = Hashtbl.find_opt t.xwayland.of_host_surface (Proxy.id surface) in
+    let paired = paired_of_surface surface in
     t.xwayland.pointer_surface <- paired;
     t.xwayland.last_event_surface <- `Pointer;
     match paired with
@@ -830,7 +835,7 @@ module Input = struct
         )
 
   let on_keyboard_entry t ~surface ~forward_event =
-    let paired = Hashtbl.find_opt t.xwayland.of_host_surface (Proxy.id surface) in
+    let paired = paired_of_surface surface in
     t.xwayland.keyboard_surface <- paired;
     t.xwayland.last_event_surface <- `Keyboard;
     match paired with
@@ -852,7 +857,7 @@ module Input = struct
         )
 
   let on_keyboard_leave t ~surface =
-    match Hashtbl.find_opt t.xwayland.of_host_surface (Proxy.id surface) with
+    match paired_of_surface surface with
     | None -> Log.warn (fun f -> f "Keyboard left unknown surface %a" Proxy.pp surface)
     | Some paired ->
       match t.focus_window with
@@ -1054,7 +1059,6 @@ let handle_xwayland ~config ~virtio_gpu ~local_wayland ~local_wm_socket =
     unpaired = Hashtbl.create 5;
     unpaired_added = Lwt_condition.create ();
     paired = Hashtbl.create 5;
-    of_host_surface = Hashtbl.create 5;
     pointer_surface = None;
     keyboard_surface = None;
     last_event_surface = `Keyboard;
@@ -1088,11 +1092,11 @@ let handle_xwayland ~config ~virtio_gpu ~local_wayland ~local_wm_socket =
         )
 
     method on_destroy_surface host_surface =
-      match Hashtbl.find_opt t.of_host_surface (Proxy.id host_surface) with
+      match paired_of_surface host_surface with
       | None -> ()      (* If it's still in [unpaired], another thread will remove it later. *)
       | Some paired ->
         Input.surface_destroyed input paired;
-        unpair t ~host_surface paired
+        unpair t paired
 
     method set_ping fn =
       t.wayland_ping <- fn
