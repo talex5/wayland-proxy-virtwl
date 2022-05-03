@@ -15,6 +15,10 @@ open Wayland
    So we just cast away version contraints using [cv]. *)
 let cv = Proxy.cast_version
 
+type surface_data = ..
+
+type surface_data += No_surface_data
+
 type xwayland_hooks = <
   on_create_surface :
     'v. ([< `V1 | `V2 | `V3 | `V4 ] as 'v) H.Wl_surface.t -> 'v C.Wl_surface.t ->
@@ -33,6 +37,10 @@ type xwayland_hooks = <
   on_keyboard_entry : 'v.
     surface:([< `V1 | `V2 | `V3 | `V4 ] as 'v) H.Wl_surface.t ->
     forward_event:(unit -> unit) ->
+    unit;
+
+  on_keyboard_leave : 'v.
+    surface:([< `V1 | `V2 | `V3 | `V4 ] as 'v) H.Wl_surface.t ->
     unit;
 
   set_ping : (unit -> unit Lwt.t) -> unit;
@@ -82,8 +90,13 @@ let update_serial t serial = t.last_serial <- serial
 (* Data attached to host objects (e.g. the corresponding client object).
    Host and client versions are assumed to match. *)
 module HD = struct
+  type 'v surface = {
+    client : 'v C.Wl_surface.t;
+    mutable data : surface_data;
+  }
+
   type 'a t = 
-    | Surface        : 'v C.Wl_surface.t                     -> [`Wl_surface]                     t
+    | Surface        : 'v surface                            -> [`Wl_surface]                     t
     | Data_offer     : 'v C.Wl_data_offer.t                  -> [`Wl_data_offer]                  t
     | Gtk_data_offer : 'v C.Gtk_primary_selection_offer.t    -> [`Zwp_primary_selection_offer_v1] t
     | Zwp_data_offer : 'v C.Zwp_primary_selection_offer_v1.t -> [`Zwp_primary_selection_offer_v1] t
@@ -153,7 +166,7 @@ let to_client (type a) (h : (a, 'v, [`Client]) Proxy.t) : (a, 'v, [`Server]) Pro
   let open HD in
   match data with
   | Output c -> cv c
-  | Surface c -> cv c
+  | Surface c -> cv c.client
   | Data_offer c -> cv c
   | Zwp_data_offer c -> cv c
   | Gtk_data_offer _ ->
@@ -375,7 +388,7 @@ end
 
 let make_surface ~xwayland ~host_surface c =
   let h =
-    let user_data = host_data (HD.Surface c) in
+    let user_data = host_data (HD.Surface { HD.client = c; data = No_surface_data }) in
     host_surface @@ object
       inherit [_] H.Wl_surface.v1
       method! user_data = user_data
@@ -485,6 +498,14 @@ let make_surface ~xwayland ~host_surface c =
       in
       x#on_create_surface h c ~set_configured
     )
+
+let set_surface_data surface data =
+  let Host_data (HD.Surface x) = user_data surface in
+  x.data <- data
+
+let get_surface_data surface =
+  let Host_data (HD.Surface x) = user_data surface in
+  x.data
 
 let make_compositor ~xwayland bind proxy =
   let h = bind @@ new H.Wl_compositor.v1 in
@@ -661,7 +682,10 @@ let make_keyboard t ~xwayland ~host_seat c =
 
       method on_leave _ ~serial ~surface =
         update_serial t serial;
-        C.Wl_keyboard.leave c ~serial ~surface:(to_client surface)
+        C.Wl_keyboard.leave c ~serial ~surface:(to_client surface);
+        xwayland |> Option.iter (fun (xwayland : xwayland_hooks) ->
+            xwayland#on_keyboard_leave ~surface
+          )
 
       method on_key _ ~serial ~time ~key ~state =
         update_serial t serial;
