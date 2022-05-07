@@ -3,9 +3,12 @@ val safe_map_file :
   Unix.file_descr ->
   kind:('a, 'b) Bigarray.kind ->
   len:int ->
+  host_size:int ->
   ('a, 'b, Bigarray.c_layout) Bigarray.Array1.t
 (** [safe_map_file] is like {!Unix.map_file}, but it doesn't try to enlarge the file
-    (which fails for special files such as shared buffers). *)
+    (which fails for special files such as shared buffers).
+    @param host_size Size (in bytes) to pass to mmap call. May be larger than [len * kind_size].
+                     Sometimes mmap is fussy about short maps. *)
 
 val pp_fd : Unix.file_descr Fmt.t
 

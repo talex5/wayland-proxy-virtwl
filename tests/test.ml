@@ -8,6 +8,7 @@ type image_data = (int32, Bigarray.int32_elt, Bigarray.c_layout) Bigarray.Array2
 
 type t = {
   shm : [`V1] Wl_shm.t;
+  linux_dmabuf : (Virtio_gpu.Wayland_dmabuf.t * Virtio_gpu.Wayland_dmabuf.fmt) option;
   surface : [`V4] Wl_surface.t;
   gpu : Virtio_gpu.t;
   mutable fg : int32;
@@ -17,12 +18,18 @@ type t = {
   mutable recycled_image : ([`V1] Wl_buffer.t * image_data) option;   (* A free buffer of size [width, height] *)
 }
 
-let with_memory_fd gpu ~size f =
-  let fd = Virtio_gpu.alloc gpu ~size in
+let with_memory_fd gpu ~width ~height f =
+  let query = {
+    Virtio_gpu.Dev.
+    width = Int32.of_int width;
+    height = Int32.of_int height;
+    drm_format = Virtio_gpu.Drm_format.xr24;
+  } in
+  let image = Virtio_gpu.alloc gpu query in
   (* Fmt.pr "Got memory FD: %d@." (Obj.magic fd : int); *)
   Fun.protect
-    (fun () -> f fd)
-    ~finally:(fun () -> Unix.close fd)
+    (fun () -> f image)
+    ~finally:(fun () -> Unix.close image.fd)
 
 let clear_recycle t =
   match t.recycled_image with
@@ -31,41 +38,74 @@ let clear_recycle t =
     Wl_buffer.destroy buffer;
     t.recycled_image <- None
 
+let alloc_shm t ~width ~height =
+  let stride = width * 4 in
+  let size = height * stride in
+  let pool, data = with_memory_fd t.gpu ~width ~height (fun { Virtio_gpu.Dev.fd; host_size; offset; _ } ->
+      let pool = Wl_shm.create_pool t.shm (new Wl_shm_pool.v1) ~fd ~size:(Int32.of_int size) in
+      let ba = Virtio_gpu.Utils.safe_map_file fd
+          ~kind:Bigarray.Int32
+          ~len:(width * height)
+          ~host_size:(Int64.to_int host_size)
+          ~pos:(Int64.of_int32 offset)
+      in
+      let ba2 = Bigarray.reshape_2 (Bigarray.genarray_of_array1 ba) height width in
+      pool, ba2
+    ) in
+  let buffer =
+    Wl_shm_pool.create_buffer pool
+      ~offset:0l
+      ~width:(Int32.of_int width)
+      ~height:(Int32.of_int height)
+      ~stride:(Int32.of_int stride)
+      ~format:Wl_shm.Format.Xrgb8888
+    @@ object
+      inherit [_] Wl_buffer.v1
+      method on_release buffer =
+        if t.width = width && t.height = height then (
+          clear_recycle t;
+          t.recycled_image <- Some (buffer, data)
+        ) else Wl_buffer.destroy buffer
+    end
+  in
+  Wl_shm_pool.destroy pool;
+  (buffer, data)
+
+let alloc_drm t (dma, fmt) ~width ~height =
+  let make_buffer, data = with_memory_fd t.gpu ~width ~height (fun image ->
+      let buffer = Virtio_gpu.Wayland_dmabuf.create_immed dma fmt image in
+      let stride = Int32.to_int image.stride / 4 in
+      let ba = Virtio_gpu.Utils.safe_map_file image.fd
+          ~kind:Bigarray.Int32
+          ~len:(height * stride)
+          ~host_size:(Int64.to_int image.host_size)
+          ~pos:(Int64.of_int32 image.offset)
+      in
+      let ba2 = Bigarray.reshape_2 (Bigarray.genarray_of_array1 ba) height stride in
+      buffer, ba2
+    ) in
+  let buffer = make_buffer @@ object
+      inherit [_] Wl_buffer.v1
+      method on_release buffer =
+        if t.width = width && t.height = height then (
+          clear_recycle t;
+          t.recycled_image <- Some (buffer, data)
+        ) else Wl_buffer.destroy buffer
+    end in
+  (buffer, data)
+
 (* Draw the content to [t.surface]. *)
 let draw_frame t =
   let width = t.width in
   let height = t.height in
-  let stride = width * 4 in
-  let size = height * stride in
   let buffer, data =
     match t.recycled_image with
     | Some saved -> t.recycled_image <- None; saved
     | None ->
       Logs.info (fun f -> f "Allocate a new %dx%d buffer" width height);
-      let pool, data = with_memory_fd t.gpu ~size (fun fd ->
-          let pool = Wl_shm.create_pool t.shm (new Wl_shm_pool.v1) ~fd ~size:(Int32.of_int size) in
-          let ba = Virtio_gpu.Utils.safe_map_file fd ~kind:Bigarray.Int32 ~len:(height * width) in
-          let ba2 = Bigarray.reshape_2 (Bigarray.genarray_of_array1 ba) height width in
-          pool, ba2
-        ) in
-      let buffer =
-        Wl_shm_pool.create_buffer pool
-          ~offset:0l
-          ~width:(Int32.of_int width)
-          ~height:(Int32.of_int height)
-          ~stride:(Int32.of_int stride)
-          ~format:Wl_shm.Format.Xrgb8888
-        @@ object
-          inherit [_] Wl_buffer.v1
-          method on_release buffer =
-            if t.width = width && t.height = height then (
-              clear_recycle t;
-              t.recycled_image <- Some (buffer, data)
-            ) else Wl_buffer.destroy buffer
-        end
-      in
-      Wl_shm_pool.destroy pool;
-      (buffer, data)
+      match t.linux_dmabuf with
+      | None -> alloc_shm t ~width ~height
+      | Some dma -> alloc_drm t dma ~width ~height
   in
   Wl_surface.attach t.surface ~buffer:(Some buffer) ~x:0l ~y:0l;
   let scroll = t.scroll in
@@ -83,6 +123,16 @@ let draw_frame t =
 let or_die = function
   | Ok x -> x
   | Error (`Msg m) -> output_string stderr (m ^ "\n"); flush stderr; exit 1
+
+let get_dmabuf gpu = function
+  | None -> Lwt.return_none
+  | Some dma ->
+    match Virtio_gpu.Wayland_dmabuf.get_format dma Virtio_gpu.Drm_format.xr24 with
+    | None -> Lwt.return_none
+    | Some fmt ->
+      let+ supported = Virtio_gpu.probe_drm gpu dma in
+      if supported then Some (dma, fmt)
+      else None
 
 let () =
   Logs.set_reporter (Logs_fmt.reporter ());
@@ -106,6 +156,7 @@ let () =
         inherit [_] Wl_shm.v1
         method on_format _ ~format:_ = ()
       end in
+    let linux_dmabuf = Virtio_gpu.Wayland_dmabuf.create display r in
     let seat = Wayland.Registry.bind r @@ object
         inherit [_] Wl_seat.v1
         method on_capabilities _ ~capabilities:_ = ()
@@ -125,7 +176,9 @@ let () =
         method on_enter _ ~output:_ = ()
         method on_leave _ ~output:_ = ()
       end in
-    let t = { gpu; shm; surface; scroll = 0; width = 0; height = 0; fg = 0xFFEEEEEEl; recycled_image = None } in
+    let* linux_dmabuf = linux_dmabuf in
+    let* linux_dmabuf = get_dmabuf gpu linux_dmabuf in
+    let t = { gpu; shm; linux_dmabuf; surface; scroll = 0; width = 0; height = 0; fg = 0xFFEEEEEEl; recycled_image = None } in
     let closed, set_closed = Lwt.wait () in
     let configured, set_configured = Lwt.wait () in
     let xdg_surface = Xdg_wm_base.get_xdg_surface xdg_wm_base ~surface @@ object
@@ -133,7 +186,7 @@ let () =
         method on_configure p ~serial =
           Xdg_surface.ack_configure p ~serial;
           if Lwt.is_sleeping configured then Lwt.wakeup set_configured ()
-    end in
+      end in
     let toplevel = Xdg_surface.get_toplevel xdg_surface @@ object
         inherit [_] Xdg_toplevel.v1
         method on_close _ = Lwt.wakeup set_closed ()

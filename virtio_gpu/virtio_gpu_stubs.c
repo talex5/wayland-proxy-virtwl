@@ -19,6 +19,8 @@
 #include <xf86drm.h>
 #include "virtgpu_drm.h"
 
+#define CAPSET_CROSS_DOMAIN 5
+
 #define Version_val(v) *((drmVersion**)Data_custom_val(v))
 
 static void finalize_version(value v) {
@@ -47,6 +49,23 @@ CAMLprim value ocaml_drm_get_version(value fd) {
     caml_failwith("drmGetVersion returned NULL");
 
   CAMLreturn(v_version);
+}
+
+CAMLprim value ocaml_drm_get_caps(value fd, value v_caps) {
+  CAMLparam1(v_caps);
+  int ret;
+  struct drm_virtgpu_get_caps args = {
+    .cap_set_id = CAPSET_CROSS_DOMAIN,
+    .size = Caml_ba_array_val(v_caps)->dim[0],
+    .addr = (unsigned long long) Caml_ba_data_val(v_caps),
+  };
+
+  ret = drmIoctl(Int_val(fd), DRM_IOCTL_VIRTGPU_GET_CAPS, &args);
+  if (ret) {
+    unix_error(errno, "DRM_IOCTL_VIRTGPU_GET_CAPS", Nothing);
+  }
+
+  CAMLreturn(Val_unit);
 }
 
 CAMLprim value ocaml_drm_version_name(value v_version) {
@@ -272,20 +291,23 @@ static value caml_unix_mapped_alloc2(int flags, int num_dims, void * data, intna
 }
 
 /* Simplified version of the stdlib's map_file that doesn't try to call fstat or ftruncate. */
-CAMLprim value ocaml_safe_map_file(value vfd, value vkind, value vstart, value vsize)
+CAMLprim value ocaml_safe_map_file(value vfd, value vkind, value vstart, value vsize, value vhostsize)
 {
   int fd, flags;
   intnat dim[1] = { Long_val(vsize) };
   uintnat array_size;
   void *addr = NULL;
+  size_t hostsize = Long_val(vhostsize);
 
   fd = Int_val(vfd);
   flags = Caml_ba_kind_val(vkind) | CAML_BA_C_LAYOUT;
   if (dim[0] < 0)
     caml_invalid_argument("safe_map_file: negative dimension");
   array_size = dim[0] * caml_ba_element_size[flags & CAML_BA_KIND_MASK];
+  if (array_size > hostsize)
+    caml_invalid_argument("safe_map_file: size greater than hostsize!");
   if (array_size > 0)
-    addr = mmap(NULL, array_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, File_offset_val(vstart));
+    addr = mmap(NULL, hostsize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, File_offset_val(vstart));
   if (addr == (void *) MAP_FAILED) uerror("map_file", Nothing);
   /* Build and return the OCaml bigarray */
   return caml_unix_mapped_alloc2(flags, 1, addr, dim);

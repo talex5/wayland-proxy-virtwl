@@ -280,10 +280,16 @@ end = struct
   }
 
   let with_memory_fd t ~size fn =
-    let fd = Virtio_gpu.alloc t.virtio_gpu ~size in
-    match fn fd with
-    | x -> Unix.close fd; x
-    | exception ex -> Unix.close fd; raise ex
+    let query = {
+      Virtio_gpu.Dev.
+      width = Int32.of_int size;
+      height = 1l;
+      drm_format = Virtio_gpu.Drm_format.r8;
+    } in
+    let image = Virtio_gpu.alloc t.virtio_gpu query in
+    match fn image with
+    | x -> Unix.close image.fd; x
+    | exception ex -> Unix.close image.fd; raise ex
 
   (* This is called when we attach a buffer to a surface
      (so the client-side buffer proxy must still exist). *)
@@ -296,9 +302,14 @@ end = struct
       let size = Int32.to_int t.size in
       let client_memory_pool = Unix.map_file client_fd Bigarray.Char Bigarray.c_layout true [| size |] in
       let host_pool, host_memory_pool =
-        with_memory_fd t ~size (fun fd ->
+        with_memory_fd t ~size (fun { Virtio_gpu.Dev.fd; host_size; offset; _ } ->
             let host_pool = H.Wl_shm.create_pool t.host_shm ~fd ~size:t.size @@ new H.Wl_shm_pool.v1 in
-            let host_memory = Virtio_gpu.Utils.safe_map_file fd ~kind:Bigarray.Char ~len:size in
+            let host_memory = Virtio_gpu.Utils.safe_map_file fd
+                ~kind:Bigarray.Char
+                ~len:size
+                ~host_size:(Int64.to_int host_size)
+                ~pos:(Int64.of_int32 offset)
+            in
             host_pool, host_memory
           )
       in
@@ -1253,6 +1264,22 @@ let create ?virtio_gpu (config : Config.t) =
   in
   let host_display, host_closed = Wayland.Client.connect ~trace:(module Trace.Host) host_transport in
   let* host_registry = Wayland.Registry.of_display host_display in
+  let* _dma =
+    match virtio_gpu with
+    | None -> Lwt.return_none
+    | Some virtio_gpu ->
+      let* dma = Virtio_gpu.Wayland_dmabuf.create host_display host_registry in
+      match dma with
+      | None ->
+        Log.info (fun f -> f "Host does not support dmabuf");
+        Lwt.return_none
+      | Some dma ->
+        let+ supported = Virtio_gpu.probe_drm virtio_gpu dma in
+        if supported then (
+          Log.warn (fun f -> f "Host is using dmabuf - this probably won't work yet");
+          Some dma
+        ) else None
+  in
   Lwt.return {
     virtio_gpu;
     host_transport;
