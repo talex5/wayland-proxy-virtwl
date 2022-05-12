@@ -28,6 +28,19 @@ module Res_handle : sig
   (** The value of the host's counter after increasing it. *)
 end
 
+module Capabilities : sig
+  type t = {
+    version : int32;
+    supported_channels : int32;
+    supports_dmabuf : bool;
+    supports_external_gpu_memory : bool;
+  }
+
+  val create_buffer : unit -> Cstruct.buffer
+
+  val of_buffer : Cstruct.buffer -> t
+end
+
 module Init_context : sig
   (** Tell Linux that we want to use the context feature, and set the parameters. *)
 
@@ -87,15 +100,6 @@ module Cross_domain_read_write : sig
   (** [create ~id buf ~len] is a message telling the host to write [buf[:len]] to host pipe [id]. *)
 end
 
-module Drm_format : sig
-  type t
-
-  val of_str : string -> t
-  (** Parse a 4-character string as a format. *)
-
-  val r8 : t
-end
-
 module Cross_domain_image_requirements : sig
   (** To share image data with the host, we tell it the details of the image and it
       returns some metadata and a resource ID which we can use to create the blob.
@@ -113,8 +117,8 @@ module Cross_domain_image_requirements : sig
 
   val parse :
     Cstruct.t ->
-    (strides:int32 ->
-     offsets:int32 ->
+    (stride0:int32 ->
+     offset0:int32 ->
      host_size:int64 ->
      blob_id:Res_handle.t -> 'a) ->
     'a

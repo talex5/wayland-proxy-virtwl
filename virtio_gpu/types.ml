@@ -22,6 +22,25 @@ module Res_handle = struct
   let next = Int32.add 2l
 end
 
+module Capabilities = struct
+  type t = {
+    version : int32;
+    supported_channels : int32;
+    supports_dmabuf : bool;
+    supports_external_gpu_memory : bool;
+  }
+
+  let create_buffer () = (Cstruct.create (4 * 4)).buffer
+
+  let of_buffer buffer =
+    let x = Cstruct.of_bigarray buffer in
+    let version = NE.get_uint32 x 0 in
+    let supported_channels = NE.get_uint32 x 1 in
+    let supports_dmabuf = NE.get_uint32 x 2 <> 0l in
+    let supports_external_gpu_memory = NE.get_uint32 x 3 <> 0l in
+    { version; supported_channels; supports_dmabuf; supports_external_gpu_memory }
+end
+
 module Init_context = struct
   type t = Cstruct.buffer
 
@@ -221,22 +240,6 @@ module Cross_domain_poll = struct
   let v = Cross_domain_header.create `POLL 8 ignore
 end
 
-module Drm_format = struct
-  type t = int32
-
-  let of_str x =
-    assert (String.length x = 4);
-    let (+) = Int32.logor in
-    let char i shift = Int32.shift_left (Int32.of_int (Char.code x.[i])) shift in
-    (char 0 0) +
-    (char 1 8) +
-    (char 2 16) +
-    (char 3 24)
-
-  let r8 = of_str "R8  "
-  let _bgr888 = of_str "BG24"
-end
-
 module Gbm = struct
   let v_BO_USE_SCANOUT = Int32.of_int @@ 1 lsl 0        (* image will be shown on screen *)
   let v_BO_USE_LINEAR  = Int32.of_int @@ 1 lsl 4        (* image is not tiled *)
@@ -249,7 +252,7 @@ module Cross_domain_image_requirements = struct
     Cross_domain_header.create `GET_IMAGE_REQUIREMENTS 16 @@ fun x ->
     NE.set_uint32 x 0 width;
     NE.set_uint32 x 4 height;
-    NE.set_uint32 x 8 drm_format;
+    NE.set_uint32 x 8 (drm_format : Drm_format.t :> int32);
     NE.set_uint32 x 12 (
       Int32.logor
         (if linear then Gbm.v_BO_USE_LINEAR else 0l)
@@ -257,11 +260,11 @@ module Cross_domain_image_requirements = struct
     )
 
   let parse t fn =
-    let strides = NE.get_uint32 t 0 in
-    let offsets = NE.get_uint32 t 16 in
+    let stride0 = NE.get_uint32 t 0 in
+    let offset0 = NE.get_uint32 t 16 in
     let host_size = NE.get_uint64 t 40 in
     let blob_id = NE.get_uint32 t 48 in
-    fn ~strides ~offsets ~host_size ~blob_id
+    fn ~stride0 ~offset0 ~host_size ~blob_id
 end
 
 module Wayland_ring = struct

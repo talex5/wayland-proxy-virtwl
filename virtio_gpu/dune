@@ -4,7 +4,7 @@
     (language c)
     (names virtio_gpu_stubs)
     (flags (:standard (:include c_flags.sexp))))
-  (libraries cstruct lwt.unix wayland)
+  (libraries cstruct lwt.unix wayland wayland.protocols)
   (c_library_flags (:include c_library_flags.sexp)))
 
 (rule

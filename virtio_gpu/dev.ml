@@ -7,6 +7,22 @@ type pipe = Lwt_io.output Lwt_io.channel
 type image_template = {
   template_id : Res_handle.t;
   host_size : int64;
+  stride0 : int32;
+  offset0 : int32;
+}
+
+type query = {
+  width : int32;
+  height : int32;
+  drm_format : Drm_format.t;
+}
+
+type image = {
+  query : query;
+  fd : Unix.file_descr;
+  host_size : int64;
+  offset : int32;
+  stride : int32;
 }
 
 type 'a t = {
@@ -15,7 +31,7 @@ type 'a t = {
   ring : Cstruct.t;     (* Invalid if [is_closed] *)
   mutable pipe_of_id : pipe Res_handle.Map.t;
   mutable last_resource_id : Res_handle.t;
-  mutable alloc_cache : (int, image_template) Hashtbl.t;
+  mutable alloc_cache : (query, image_template) Hashtbl.t;
 } constraint 'a = [< `Wayland | `Alloc ]
 
 let is_closed t =
@@ -30,6 +46,7 @@ let get_dev t =
 type version
 
 external drm_get_version : Unix.file_descr -> version = "ocaml_drm_get_version"
+external drm_get_caps : Unix.file_descr -> Cstruct.buffer -> unit = "ocaml_drm_get_caps"
 external drm_version_name : version -> string = "ocaml_drm_version_name"
 external drm_context_init : Unix.file_descr -> int -> Cstruct.buffer -> unit = "ocaml_drm_context_init"
 external drm_create_blob : Unix.file_descr -> Create_blob.t -> unit = "ocaml_drm_create_blob"
@@ -65,12 +82,29 @@ let poll t =
   let dev = get_dev t in
   drm_exec_buffer dev Cross_domain_poll.v ~ring:`Channel ~handles:[| t.ring_handle |]
 
+let check_caps fd =
+  let caps = Capabilities.create_buffer () in
+  drm_get_caps fd caps;
+  let { Capabilities.
+        version;
+        supported_channels;
+        supports_dmabuf;
+        supports_external_gpu_memory;
+      } = Capabilities.of_buffer caps in 
+  Log.debug (fun f -> f "Capabilities: version=%ld, supported_channels=0x%lx, dmabuf=%b, external_gpu_memory=%b"
+                version
+                supported_channels
+                supports_dmabuf
+                supports_external_gpu_memory
+            )
+
 let of_fd fd =
   let unix_fd = Lwt_unix.unix_file_descr fd in
   let version = drm_get_version unix_fd in
   if drm_version_name version <> "virtio_gpu" then None
   else (
-    (* todo: Get parameters, get caps, check it supports Wayland *)
+    check_caps unix_fd;
+    (* todo: Get parameters, check it supports Wayland *)
     init_context unix_fd [
       `Capset_id `Cross_domain;
       `Num_rings 2;
@@ -80,7 +114,7 @@ let of_fd fd =
     let ring_handle, ring_id = create_blob unix_fd ~size:(Int64.of_int page_size) `Guest ~mappable:true ~shareable:false in
     (* Map it into our address space *)
     let offset = drm_map unix_fd ring_handle in
-    let ring = Utils.safe_map_file unix_fd ~pos:offset ~len:page_size ~kind:Bigarray.char in
+    let ring = Utils.safe_map_file unix_fd ~pos:offset ~len:page_size ~host_size:page_size ~kind:Bigarray.char in
     (* Tell Linux to use it for Wayland *)
     let init = Cross_domain_init.create ~ring:ring_id ~channel_type:`Wayland in
     drm_exec_buffer unix_fd init;
@@ -95,33 +129,34 @@ let of_fd fd =
 
 (* Each time we query crosvm, it allocates a new resource which is never freed (while the device is open).
    So cache every response. *)
-let query_image t ~size =
-  match Hashtbl.find_opt t.alloc_cache size with
+let query_image t query =
+  match Hashtbl.find_opt t.alloc_cache query with
   | Some x -> x
   | None ->
     let cs = Cross_domain_image_requirements.create
         ~linear:true
         ~scanout:true
-        ~width:(Int32.of_int size)
-        ~height:Int32.one
-        ~drm_format:Drm_format.r8
+        ~width:query.width
+        ~height:query.height
+        ~drm_format:query.drm_format
     in
     let dev = get_dev t in
     drm_exec_buffer dev cs ~ring:`Query ~handles:[| t.ring_handle |];
     drm_wait dev t.ring_handle;
-    Cross_domain_image_requirements.parse t.ring @@ fun ~strides:_ ~offsets:_ ~host_size ~blob_id ->
-    let cached = { host_size; template_id = blob_id } in
-    Hashtbl.add t.alloc_cache size cached;
+    Cross_domain_image_requirements.parse t.ring @@ fun ~stride0 ~offset0 ~host_size ~blob_id ->
+    let cached = { host_size; template_id = blob_id; stride0; offset0 } in
+    Hashtbl.add t.alloc_cache query cached;
     cached
 
-let alloc t ~size =
+let alloc t query =
   let dev = get_dev t in
-  let details = query_image t ~size in 
-  (* Fmt.pr "Strides = %ld, offsets = %ld, host_size = %Ld, blob_id = %Ld@." _strides _offsets host_size blob_id; *)
+  let details = query_image t query in 
+  Log.info (fun f -> f "alloc: strides = %ld, offsets = %ld, host_size = %Ld, blob_id = %a"
+               details.stride0 details.offset0 details.host_size Res_handle.pp details.template_id);
   let bo_handle, _ = create_blob dev (`Host3D details.template_id) ~size:details.host_size ~mappable:true ~shareable:true in
   let fd = drm_prime_handle_to_fd dev bo_handle in
   close_gem_handle dev bo_handle;
-  fd
+  { query; fd; host_size = details.host_size; stride = details.stride0; offset = details.offset0 }
 
 let create_send t data fds =
   let handles = ref [] in

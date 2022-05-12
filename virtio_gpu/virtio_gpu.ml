@@ -1,7 +1,9 @@
 open Lwt.Syntax
 open Lwt.Infix
 
+module Drm_format = Drm_format
 module Dev = Dev
+module Wayland_dmabuf = Wayland_dmabuf
 module Utils = Utils
 
 type transport = < Wayland.S.transport; close : unit Lwt.t >
@@ -9,6 +11,7 @@ type transport = < Wayland.S.transport; close : unit Lwt.t >
 type t = {
   device_path : string;
   alloc : [`Alloc] Dev.t;
+  mutable have_dmabuf : bool option;    (* None if we haven't checked yet *)
 }
 
 let wayland_transport dev fd : #Wayland.S.transport =
@@ -107,13 +110,13 @@ let find_device ?dri_dir () =
     let* fd = Lwt_unix.(openfile device_path [O_RDWR; O_CLOEXEC] 0) in
     match Dev.of_fd fd with
     | None -> let+ () = Lwt_unix.close fd in None
-    | Some alloc -> Lwt.return_some { device_path; alloc }
+    | Some alloc -> Lwt.return_some { device_path; alloc; have_dmabuf = None }
   in
   find_device_gen ?dri_dir init
 
 let close t = Dev.close t.alloc
 
-let alloc t ~size = Dev.alloc t.alloc ~size
+let alloc t = Dev.alloc t.alloc
 
 let connect_wayland t =
   let* fd = Lwt_unix.(openfile t.device_path [O_RDWR; O_CLOEXEC] 0) in
@@ -122,3 +125,28 @@ let connect_wayland t =
   | None ->
     let+ () = Lwt_unix.close fd in
     Fmt.failwith "%S is no longer a virtio-gpu device!" t.device_path
+
+let with_memory_fd gpu ~width ~height f =
+  let query = {
+    Dev.
+    width;
+    height;
+    drm_format = Drm_format.xr24;
+  } in
+  let image = alloc gpu query in
+  (* Fmt.pr "Got memory FD: %d@." (Obj.magic fd : int); *)
+  Fun.protect
+    (fun () -> f image)
+    ~finally:(fun () -> Unix.close image.fd)
+
+let probe_drm t drm =
+  match t.have_dmabuf with
+  | Some x -> Lwt.return x
+  | None ->
+    let+ x =
+      with_memory_fd t ~width:1l ~height:1l (fun image ->
+          Wayland_dmabuf.probe_drm drm image
+        )
+    in
+    t.have_dmabuf <- Some x;
+    x
