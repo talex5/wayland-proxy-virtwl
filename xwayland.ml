@@ -993,6 +993,11 @@ let string_of_fd (fd : Lwt_unix.file_descr) =
   let fd : int = Obj.magic (Lwt_unix.unix_file_descr fd : Unix.file_descr) in
   string_of_int fd
 
+let quiet_logging () =
+  let quiet = ref true in
+  Log.debug (fun _ -> quiet := false);
+  !quiet
+
 (* Exec Xwayland (note: this function runs in a forked child process).
    @param display X11 display number
    @param remote_wayland Xwayland's end of the Wayland protocol socket
@@ -1016,6 +1021,12 @@ let exec_xwayland config ~display ~remote_wayland ~remote_wm_socket ~listen_sock
     Lwt_unix.clear_close_on_exec remote_wayland;
     Lwt_unix.clear_close_on_exec listen_socket;
     Lwt_unix.clear_close_on_exec remote_wm_socket;
+    (* Hide the huge number of "Could not resolve keysym" warnings from xkbcomp *)
+    if quiet_logging () then (
+      let null = Unix.openfile Filename.null Unix.[O_RDWR] 0 in
+      Unix.dup2 null Unix.stderr;
+      Unix.close null;
+    );
     Unix.execvp cmd.(0) cmd
   with ex ->
     Format.eprintf "Fork error: %a@." Fmt.exn ex;
