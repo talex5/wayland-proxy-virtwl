@@ -13,8 +13,8 @@ let
         {
           owner = "ocaml";
           repo = "opam-repository";
-          rev = "0f7d0100f8dfda051dcbac23b87f1511361a6881";
-          sha256 = "02xkkigm21ffiz6q34wrvgvixwf2abhydg93hrnmrna70wb2a4sx";
+          rev = "7c8d76fc17da62ccefcff739e253913211e5a055";
+          sha256 = "08gnyl2j7mpxjmv0rac4rbxp37mi39cmgkv9jdgjmp17c7gr6rvg";
         };
         src = (pkgs.fetchFromGitHub) fetch;
       };
@@ -23,7 +23,7 @@ let
 in
 {
   format-version = 4;
-  ocaml-version = "4.12.0";
+  ocaml-version = "4.12.1";
   repos = repos;
   selection = 
   {
@@ -153,16 +153,16 @@ in
       };
       opamSrc = repoPath (repos.opam-repository.src) 
       {
-        hash = "sha256:0pzd8irqkkkpfgw8nq9d21z9rj5m3qlzixyb7ybfy4b1fwh3n8bp";
-        package = "packages/cppo/cppo.1.6.8";
+        hash = "sha256:19i6yqv9lq09v3xw1sfqayh40sihhd4hfyvk9dwz1m5dv1g63xlp";
+        package = "packages/cppo/cppo.1.6.9";
       };
       pname = "cppo";
       src = pkgs.fetchurl 
       {
-        sha256 = "0lxy4xkkkwgs1cj6d9lyzsqi9f6fc9r6cir5imi7yjqrpd86s1by";
-        url = "https://github.com/ocaml-community/cppo/archive/v1.6.8.tar.gz";
+        sha256 = "0sm2vn5y7w7fyrwkv7f86y4nvs5vsrqy1x2nidy0lcqxq62ns0qn";
+        url = "https://github.com/ocaml-community/cppo/archive/v1.6.9.tar.gz";
       };
-      version = "1.6.8";
+      version = "1.6.9";
     };
     csexp = 
     {
@@ -239,16 +239,16 @@ in
       };
       opamSrc = repoPath (repos.opam-repository.src) 
       {
-        hash = "sha256:18i03m36vrfb1lnaxqacrdqc8ihff4qalrgmgym9xp37ah500d6j";
-        package = "packages/dune/dune.3.0.3";
+        hash = "sha256:1062nmn0y17f01vly9vf4a3kmby5gz7pl6h6gq6i3lxnl05jynpw";
+        package = "packages/dune/dune.3.2.0";
       };
       pname = "dune";
       src = pkgs.fetchurl 
       {
-        sha256 = "0bvkwm0nqs74gwanfcd7xind8c9fdwwdgzzvmsfdkw2q2sd4j16m";
-        url = "https://github.com/ocaml/dune/releases/download/3.0.3/fiber-3.0.3.tbz";
+        sha256 = "1g6m3a5b1nhvrxw5agzmng7ayy1rwbib56x8dyr1xvbrmvkbq7xx";
+        url = "https://github.com/ocaml/dune/releases/download/3.2.0/chrome-trace-3.2.0.tbz";
       };
-      version = "3.0.3";
+      version = "3.2.0";
     };
     dune-configurator = 
     {
@@ -260,16 +260,16 @@ in
       };
       opamSrc = repoPath (repos.opam-repository.src) 
       {
-        hash = "sha256:1y1f6fabs4r5pyb1p5yvnb5sy12shqviaqq10xg9kwwimxqqyyj4";
-        package = "packages/dune-configurator/dune-configurator.3.0.3";
+        hash = "sha256:0658amxrfkxa7h7sx13lks7k2kpcq39mavx2jy8hnyg047jzn848";
+        package = "packages/dune-configurator/dune-configurator.3.2.0";
       };
       pname = "dune-configurator";
       src = pkgs.fetchurl 
       {
-        sha256 = "0bvkwm0nqs74gwanfcd7xind8c9fdwwdgzzvmsfdkw2q2sd4j16m";
-        url = "https://github.com/ocaml/dune/releases/download/3.0.3/fiber-3.0.3.tbz";
+        sha256 = "1g6m3a5b1nhvrxw5agzmng7ayy1rwbib56x8dyr1xvbrmvkbq7xx";
+        url = "https://github.com/ocaml/dune/releases/download/3.2.0/chrome-trace-3.2.0.tbz";
       };
-      version = "3.0.3";
+      version = "3.2.0";
     };
     fmt = 
     {
@@ -404,12 +404,12 @@ in
       };
       opamSrc = repoPath (repos.opam-repository.src) 
       {
-        hash = "sha256:038vq14gnl2qzgk4mjr0xif1xln30wk5hbj2icvq3ql6hszyrf9g";
-        package = "packages/ocaml/ocaml.4.12.0";
+        hash = "sha256:07karyxsgb73ik1v322ka76gqf5g2kr4pc9jg8cmbqy2h8ifaklv";
+        package = "packages/ocaml/ocaml.4.12.1";
       };
       pname = "ocaml";
       src = null;
-      version = "4.12.0";
+      version = "4.12.1";
     };
     ocaml-base-compiler = 
     {
@@ -417,16 +417,16 @@ in
       };
       opamSrc = repoPath (repos.opam-repository.src) 
       {
-        hash = "sha256:12clsv2kmwsfy685kjkjsyv41krfrr04ccpc11xhv6ar0090bsh5";
-        package = "packages/ocaml-base-compiler/ocaml-base-compiler.4.12.0";
+        hash = "sha256:1ihsf125sl259ibw2dvjnp5vfihhiix6xj8gq19f8s0idm9dcyl6";
+        package = "packages/ocaml-base-compiler/ocaml-base-compiler.4.12.1";
       };
       pname = "ocaml-base-compiler";
       src = pkgs.fetchurl 
       {
-        sha256 = "0i37laikik5vwydw1cwygxd8xq2d6n35l20irgrh691njlwpmh5d";
-        url = "https://github.com/ocaml/ocaml/archive/4.12.0.tar.gz";
+        sha256 = "0hbax5bmq8lwyr8868csc8waz8b22fmzr40mgg77md3wan88m97m";
+        url = "https://github.com/ocaml/ocaml/archive/4.12.1.tar.gz";
       };
-      version = "4.12.0";
+      version = "4.12.1";
     };
     ocaml-compiler-libs = 
     {
