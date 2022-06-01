@@ -169,6 +169,21 @@ let pp_timestamp f x =
   Fmt.pf f "%04d-%02d-%02d %02d:%02d:%02d.%03d" (tm.tm_year + 1900) (tm.tm_mon + 1)
     tm.tm_mday tm.tm_hour tm.tm_min tm.tm_sec (ms_of_time x)
 
+let log_ring = ref None
+let last_log_flush = ref 0.0
+let max_flush_freq = 600.0       (* 10 minutes *)
+
+let maybe_flush_log_ring msg =
+  match !log_ring with
+  | None -> ()
+  | Some ring ->
+    let now = Unix.gettimeofday () in
+    if now -. !last_log_flush > max_flush_freq then (
+      last_log_flush := now;
+      Log.warn (fun f -> f "Flushing (%s)" msg);
+      Ring_buffer.flush_to_file ring
+    )
+
 let reporter ring =
   let report src level ~over k msgf =
     let src = Logs.Src.name src in
@@ -186,6 +201,7 @@ let reporter ring =
             flush stderr;
         end;
         over ();
+        if level = Logs.Error then maybe_flush_log_ring "due to error-level log";
         k ()
       )
       ("%a %11s %a: @[" ^^ fmt ^^ "@]@.")
@@ -195,14 +211,14 @@ let reporter ring =
   in
   { Logs.report = report }
 
-let handle_async_error ~ring ex =
+let handle_async_error ex =
   let bt = Printexc.get_raw_backtrace () in
-  Log.err (fun f -> f "Uncaught async exception: %a" Fmt.exn_backtrace (ex, bt));
-  Option.iter Ring_buffer.flush_to_file ring
+  Log.err (fun f -> f "Uncaught async exception: %a" Fmt.exn_backtrace (ex, bt))
 
 let setup_logging ~verbose ~log_suppress ~log_ring_file ~log_ring_size ~wayland_display =
   let ring = Option.map (Ring_buffer.create ~log_ring_size) log_ring_file in
-  Lwt.async_exception_hook := handle_async_error ~ring;
+  log_ring := ring;
+  Lwt.async_exception_hook := handle_async_error;
   Logs.set_reporter (reporter ring);
   let* () =
     match ring with
