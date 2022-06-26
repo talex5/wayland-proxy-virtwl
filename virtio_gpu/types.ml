@@ -80,7 +80,7 @@ module Init_context = struct
         init (Cstruct.shift cs 16) items
     in
     let n = List.length items in
-    let buffer = Bigarray_compat.(Array1.create char c_layout (n * 16)) in
+    let buffer = Bigarray.(Array1.create char c_layout (n * 16)) in
     let cs = Cstruct.of_bigarray buffer in
     init cs items;
     buffer
