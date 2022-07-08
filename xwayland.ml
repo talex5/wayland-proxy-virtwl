@@ -544,7 +544,7 @@ let examine_window t window : window_info Lwt.t =
   let window_type =
     let rec aux = function
       | [] -> `Unknown
-      | ty :: _ when ty = type_normal -> `Normal
+      | ty :: _ when ty = type_normal && not win_attrs.override_redirect -> `Normal
       | ty :: _ when ty = type_dialog && not win_attrs.override_redirect -> `Dialog
       | ty :: _ when ty = type_dialog && win_attrs.override_redirect -> `Popup
       | ty :: _ when ty = type_dropdown_menu -> `Popup
