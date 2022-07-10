@@ -96,6 +96,8 @@ let intern ?only_if_exists t name =
   X11.Atom.intern ?only_if_exists x11 name
 
 module Selection = struct
+  let log_selection = Log.warn
+
   (* There are two states here:
 
      - An X11 client owns the selection (and we own the Wayland selection).
@@ -154,6 +156,7 @@ module Selection = struct
       inherit [_] Primary_device.v1
 
       method on_selection _ offer =
+        log_selection (fun f -> f "@[<h>primary: new Wayland offer %a@]" Fmt.(option ~none:(any "-") (using Proxy.id uint32)) offer);
         !wayland_primary_offer |> Option.iter (fun old ->
             Primary_offer.destroy old;
             Proxy.delete old            (* Objects with IDs created by the server need to be deleted manually *)
@@ -176,6 +179,7 @@ module Selection = struct
       inherit [_] Clipboard_device.v1
 
       method on_selection _ offer =
+        log_selection (fun f -> f "@[<h>clipboard: new Wayland offer %a@]" Fmt.(option ~none:(any "-") (using Proxy.id uint32)) offer);
         !wayland_clipboard_offer |> Option.iter (fun old ->
             Clipboard_offer.destroy old;
             Proxy.delete old            (* Objects with IDs created by the server need to be deleted manually *)
@@ -233,6 +237,11 @@ module Selection = struct
         let* clipboard = X11.Atom.intern x11 "CLIPBOARD" in
         let reply property = X11.Selection.notify x11 selection ~time:(`Time time) ~requestor ~target ~property in
         let property = Option.value property ~default:target in (* For old clients; see ICCCM *)
+        let label = 
+          if selection = primary then "primary"
+          else if selection = clipboard then "clipboard"
+          else "other"
+        in
         let offer =
           let get_targets fn = Option.map (fun offer -> fn offer, get_targets offer) in
           if selection = primary then get_targets Primary_offer.receive !(t.wayland_primary_offer)
@@ -241,9 +250,10 @@ module Selection = struct
         in
         match offer with
         | None ->
-          Log.info (fun f -> f "No Wayland %a offer - rejecting request" (X11.Atom.pp x11) selection);
+          log_selection (fun f -> f "[%s] No Wayland %a offer - rejecting request" label (X11.Atom.pp x11) selection);
           reply None
         | Some (receive, targets) ->
+          log_selection (fun f -> f "[%s]: requesting Wayland selection on behalf of X11 app" label);
           let* mime_type, reply_target = X11.Atom.get_name x11 target >|= mime_type_of_target ~targets in
           if List.mem mime_type targets then (
             let r, w = Unix.pipe () in
@@ -255,6 +265,7 @@ module Selection = struct
                  Lwt_io.read r
               )
               (fun data ->
+                 log_selection (fun f -> f "[%s]: finished reading selection" label);
                  let* () = Lwt_io.close r in
                  let* reply_target = X11.Atom.intern x11 reply_target in
                  let* () = X11.Property.set_string ~ty:reply_target x11 requestor property data in
@@ -266,7 +277,7 @@ module Selection = struct
                  reply None
               )
           ) else (
-            Log.info (fun f -> f "Request for unavailable MIME type %S - rejecting" mime_type);
+            log_selection (fun f -> f "[%s]: request for unavailable MIME type %S - rejecting" label mime_type);
             reply None
           )
       );
@@ -283,11 +294,12 @@ module Selection = struct
     | None -> Lwt.return_unit
     | Some fn ->
       let* x11 = t.x11 in
-      Log.info (fun f -> f "Started a new transfer for %a; cancelling existing one" (X11.Atom.pp x11) selection);
+      log_selection (fun f -> f "Started a new transfer for %a; cancelling existing one" (X11.Atom.pp x11) selection);
       fn None
 
   (* We have been notified by an X application that the data we requested is now ready. *)
   let selection_notify t ~time ~requestor:_ ~selection ~target ~property =
+    log_selection (fun f -> f "X11 selection data now ready");
     let key = { selection; target } in
     begin match Hashtbl.find_opt t.awaiting_notify key with
       | None -> Log.warn (fun f -> f "Unexpected SelectionNotify!")
@@ -375,11 +387,11 @@ module Selection = struct
           inherit [_] Primary_source.v1
 
           method on_send _ ~mime_type ~fd =
-            Log.info (fun f -> f "Sending X PRIMARY selection to Wayland (%S)" mime_type);
+            log_selection (fun f -> f "Sending X PRIMARY selection to Wayland (%S)" mime_type);
             send_x_selection t primary ~via:requestor ~mime_type ~dst:fd
 
           method on_cancelled self =
-            Log.info (fun f -> f "X selection source cancelled by Wayland - X app no longer owns selection");
+            log_selection (fun f -> f "X selection source cancelled by Wayland - X app no longer owns selection");
             Lwt.async (fun () ->
                 X11.Selection.set_owner x11 ~owner:(Some requestor) ~timestamp:`CurrentTime primary
               );
@@ -411,11 +423,11 @@ module Selection = struct
         inherit [_] Clipboard_source.v1
 
         method on_send _ ~mime_type ~fd =
-          Log.info (fun f -> f "Sending X CLIPBOARD selection to Wayland (%S)" mime_type);
+          log_selection (fun f -> f "Sending X CLIPBOARD selection to Wayland (%S)" mime_type);
           send_x_selection t clipboard ~via:requestor ~mime_type ~dst:fd
 
         method on_cancelled self =
-          Log.info (fun f -> f "X selection source cancelled by Wayland - X app no longer owns clipboard");
+          log_selection (fun f -> f "X selection source cancelled by Wayland - X app no longer owns clipboard");
           Lwt.async (fun () ->
               X11.Selection.set_owner x11 ~owner:(Some requestor) ~timestamp:`CurrentTime clipboard
             );
@@ -439,10 +451,10 @@ module Selection = struct
         let* primary = X11.Atom.intern x11 "PRIMARY"
         and* clipboard = X11.Atom.intern x11 "CLIPBOARD" in
         if selection = primary then (
-          Log.info (fun f -> f "An Xwayland app now owns the PRIMARY selection");
+          log_selection (fun f -> f "An Xwayland app now owns the PRIMARY selection");
           set_x_owned_primary t
         ) else if selection = clipboard then (
-          Log.info (fun f -> f "An Xwayland app now owns the CLIPBOARD selection");
+          log_selection (fun f -> f "An Xwayland app now owns the CLIPBOARD selection");
           set_x_owned_clipboard t
         ) else (
           Log.warn (fun f -> f "SelectionClear for unknown selection type %a" (X11.Atom.pp x11) selection);
