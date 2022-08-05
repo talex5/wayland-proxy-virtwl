@@ -24,7 +24,7 @@ See [Qubes-lite With KVM and Wayland](https://roscidus.com/blog/blog/2021/03/07/
 Clone the repository:
 
 ```
-git clone https://github.com/talex5/wayland-proxy-virtwl.git
+git clone --recursive https://github.com/talex5/wayland-proxy-virtwl.git
 ```
 
 Then build with either opam (`opam install .`) or Nix (`nix-build .`).
