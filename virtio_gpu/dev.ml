@@ -168,8 +168,18 @@ let create_send t data fds =
       let fd = Unix.dup ~cloexec:true fd in
       let pipe = Lwt_io.(of_unix_fd ~mode:output) fd in
       let id = Res_handle.next t.last_resource_id in
+      Log.info (fun f -> f "Sending pipe to host (new id=%a)" Res_handle.pp id);
       t.pipe_of_id <- Res_handle.Map.add id pipe t.pipe_of_id;
       t.last_resource_id <- id;
+      Lwt.async (fun () ->
+          let* () = Lwt_unix.sleep 2.0 in
+          if Res_handle.Map.mem id t.pipe_of_id then (
+            t.pipe_of_id <- Res_handle.Map.remove id t.pipe_of_id;
+            let* () = Lwt_io.close pipe in
+            (* Will dump ring, as async error: *)
+            Fmt.failwith "Pipe %a still open after 2s; forcing close!" Res_handle.pp id;
+          ) else Lwt.return_unit
+        );
       (id, `Read_pipe)          (* We read; the host writes *)
     | _ ->
       (* Send a buffer *)
@@ -248,8 +258,12 @@ module Recv = struct
         if data = "" then Lwt.return_unit
         else Lwt_io.write pipe data
       in
+      if data = "" && hang_up = false then (
+        Log.warn (fun f -> f "Empty read, but no hang-up for %a" Res_handle.pp id);
+      );
       if hang_up then (
         t.pipe_of_id <- Res_handle.Map.remove id t.pipe_of_id;
+        Log.info (fun f -> f "Closing pipe %a" Res_handle.pp id);
         Lwt_io.close pipe
       ) else (
         Lwt.return_unit
