@@ -15,8 +15,8 @@ module Xdg_positioner = Wayland_protocols.Xdg_shell_client.Xdg_positioner
 module Xdg_decor_mgr = Wayland_protocols.Xdg_decoration_unstable_v1_client.Zxdg_decoration_manager_v1
 module Xdg_decoration = Wayland_protocols.Xdg_decoration_unstable_v1_client.Zxdg_toplevel_decoration_v1
 
-type host_surface = [`V1 | `V2 | `V3 | `V4 ] Wayland.Wayland_client.Wl_surface.t
-type client_surface = [`V1 | `V2 | `V3 | `V4 ] Wayland.Wayland_server.Wl_surface.t
+type host_surface = [`V1 | `V2 | `V3 | `V4 | `V5] Wayland.Wayland_client.Wl_surface.t
+type client_surface = [`V1 | `V2 | `V3 | `V4 | `V5] Wayland.Wayland_server.Wl_surface.t
 
 (* When Xwayland notifies us of a new surface over the Wayland connection, we record the details.
    We don't yet know the X11 window ID, however.
@@ -580,6 +580,7 @@ let init_toplevel t ~x11 ~xdg_surface ~info ~paired window =
         )
 
       method on_configure_bounds _ ~width:_ ~height:_ = ()
+      method on_wm_capabilities _ ~capabilities:_ = ()
 
       method on_close _ =
         Lwt.async (fun () ->

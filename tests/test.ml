@@ -199,6 +199,7 @@ let () =
             t.height <- height;
           )
         method on_configure_bounds _ ~width:_ ~height:_ = ()
+        method on_wm_capabilities _ ~capabilities:_ = ()
       end in
     Xdg_toplevel.set_title toplevel ~title:"virtio-gpu-proxy";
     Wl_surface.commit surface;

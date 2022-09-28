@@ -21,26 +21,26 @@ type surface_data += No_surface_data
 
 type xwayland_hooks = <
   on_create_surface :
-    'v. ([< `V1 | `V2 | `V3 | `V4 ] as 'v) H.Wl_surface.t -> 'v C.Wl_surface.t ->
+    'v. ([< `V1 | `V2 | `V3 | `V4 | `V5] as 'v) H.Wl_surface.t -> 'v C.Wl_surface.t ->
     set_configured:([`Show | `Hide | `Unmanaged] -> unit) ->
     unit;
 
   on_destroy_surface :
-    'v. ([< `V1 | `V2 | `V3 | `V4 ] as 'v) H.Wl_surface.t ->
+    'v. ([< `V1 | `V2 | `V3 | `V4 | `V5] as 'v) H.Wl_surface.t ->
     unit;
 
   on_pointer_entry : 'v.
-    surface:([< `V1 | `V2 | `V3 | `V4 ] as 'v) H.Wl_surface.t ->
+    surface:([< `V1 | `V2 | `V3 | `V4 | `V5] as 'v) H.Wl_surface.t ->
     forward_event:(unit -> unit) ->
     unit;
 
   on_keyboard_entry : 'v.
-    surface:([< `V1 | `V2 | `V3 | `V4 ] as 'v) H.Wl_surface.t ->
+    surface:([< `V1 | `V2 | `V3 | `V4 | `V5] as 'v) H.Wl_surface.t ->
     forward_event:(unit -> unit) ->
     unit;
 
   on_keyboard_leave : 'v.
-    surface:([< `V1 | `V2 | `V3 | `V4 ] as 'v) H.Wl_surface.t ->
+    surface:([< `V1 | `V2 | `V3 | `V4 | `V5] as 'v) H.Wl_surface.t ->
     unit;
 
   set_ping : (unit -> unit Lwt.t) -> unit;
@@ -488,6 +488,11 @@ let make_surface ~xwayland ~host_surface c =
     method on_set_buffer_transform _ ~transform =
       when_configured @@ fun () ->
       H.Wl_surface.set_buffer_transform h ~transform
+
+    method on_offset _ ~x ~y =
+      when_configured @@ fun () ->
+      let (x, y) = scale_to_host ~xwayland (x, y) in
+      H.Wl_surface.offset h ~x ~y
   end;
   xwayland |> Option.iter (fun (x:xwayland_hooks) ->
       if x#scale <> 1l then
@@ -610,6 +615,8 @@ let make_output ~xwayland bind c =
       method on_done _ = C.Wl_output.done_ (Proxy.cast_version c)
       method on_geometry _ = C.Wl_output.geometry c
       method on_mode _ = C.Wl_output.mode c
+      method on_name _ ~name = C.Wl_output.name c ~name
+      method on_description _ ~description = C.Wl_output.description c ~description
 
       method on_scale _ ~factor =
         let factor =
@@ -635,6 +642,7 @@ let make_pointer t ~xwayland ~host_seat c =
       method on_axis_discrete _ = C.Wl_pointer.axis_discrete c
       method on_axis_source _ = C.Wl_pointer.axis_source c
       method on_axis_stop _ = C.Wl_pointer.axis_stop c
+      method on_axis_value120 _ = C.Wl_pointer.axis_value120 c
 
       method on_button _ ~serial ~time ~button ~state =
         update_serial t serial;
@@ -775,6 +783,7 @@ let make_toplevel ~tag ~host_toplevel c =
       method on_close _ = C.Xdg_toplevel.close c
       method on_configure _ = C.Xdg_toplevel.configure c
       method on_configure_bounds _ = C.Xdg_toplevel.configure_bounds c
+      method on_wm_capabilities _ = C.Xdg_toplevel.wm_capabilities c
     end
   in
   let user_data = client_data (Toplevel h) in
