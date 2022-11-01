@@ -1,3 +1,0 @@
-[submodule "ocaml-wayland"]
-	path = ocaml-wayland
-	url = https://github.com/talex5/ocaml-wayland.git
