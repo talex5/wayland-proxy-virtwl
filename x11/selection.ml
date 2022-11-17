@@ -23,6 +23,38 @@ end
 
 let set_owner = SetOwner.send
 
+module GetOwner = struct
+  [%%cstruct
+    type request = {
+      selection : uint32_t;
+    } [@@little_endian]
+  ]
+
+  [%%cstruct
+    type reply = {
+      code : uint8_t;
+      _unused : uint8_t;
+      seq : uint16_t;
+      length : uint32_t;
+      owner : uint32_t;
+      unused : uint8_t [@len 20];
+    } [@@little_endian]
+  ]
+
+  let send t selection =
+    let open Lwt.Syntax in
+    Log.info (fun f -> f "GetSelectionOwner of %a" (Atom.pp t) selection);
+    let+ r = Request.send_exn t ~major:23 sizeof_request (fun r ->
+        set_request_selection r selection
+      )
+    in
+    let window = get_reply_owner r in
+    Log.info (fun f -> f "GetSelectionOwner %a => %a" (Atom.pp t) selection Window.pp window);
+    window
+end
+
+let get_owner = GetOwner.send
+
 module Convert = struct
   [%%cstruct
     type req = {

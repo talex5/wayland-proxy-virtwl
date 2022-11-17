@@ -141,6 +141,8 @@ module Ring_buffer = struct
     flush ch
 end
 
+let resync_selections = ref ignore
+
 let create_ring_control_socket ~wayland_display ring =
   let ring_buffer_log_ctl = Printf.sprintf "/run/user/%d/%s-ctl" (Unix.getuid ()) wayland_display in
   if Sys.file_exists ring_buffer_log_ctl then Unix.unlink ring_buffer_log_ctl;
@@ -152,6 +154,7 @@ let create_ring_control_socket ~wayland_display ring =
         | Some cmd ->
           Log.warn (fun f -> f "Got command on %S: %S (dumping log)" ring_buffer_log_ctl cmd);
           Ring_buffer.flush_to_file ring;
+          !resync_selections ();
           aux pipe
         | None ->
           let* () = Lwt_io.close pipe in

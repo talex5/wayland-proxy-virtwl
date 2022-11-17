@@ -135,6 +135,7 @@ module Selection = struct
 
   type t = {
     x11 : X11.Display.t Lwt.t;
+    mutable primary_owner : [`Wayland | `X11];
     wayland_primary_offer : [`V1] Primary_offer.t option ref;
     wayland_clipboard_offer : [`V1|`V2|`V3] Clipboard_offer.t option ref;
     primary_selection : ([`V1] Primary_mgr.t * [`V1] Primary_device.t) option;
@@ -365,6 +366,7 @@ module Selection = struct
   (* We lost our ownership of the X selection. This means that an X client now owns the selection.
      Tell Wayland that we can now provide that selection to it. *)
   let set_x_owned_primary t =
+    t.primary_owner <- `X11;
     match t.primary_selection with
     | None -> Lwt.return_unit
     | Some (primary_selection_mgr, primary_device) ->
@@ -392,6 +394,7 @@ module Selection = struct
 
           method on_cancelled self =
             log_selection (fun f -> f "X selection source cancelled by Wayland - X app no longer owns selection");
+            t.primary_owner <- `Wayland;
             Lwt.async (fun () ->
                 X11.Selection.set_owner x11 ~owner:(Some requestor) ~timestamp:`CurrentTime primary
               );
@@ -468,6 +471,31 @@ module Selection = struct
     let geometry = { X11.Geometry.x = 0; y = 0; width = 1; height = 1 } in
     X11.Window.create_input_only x11 ~parent ~geometry (X11.Window.create_attributes ())
 
+  let monitor_primary t ~selection_window =
+    let* x11 = t.x11 in
+    let* primary = X11.Atom.intern x11 "PRIMARY" in
+    let rec aux () = 
+      let* () = Lwt_unix.sleep 1.0 in (* XXX *)
+      let* () =
+        match t.primary_owner with
+        | `X11 ->
+          Log.info (fun f -> f "An X11 app owns PRIMARY; not checking");
+          Lwt.return_unit
+        | `Wayland ->
+          (* A Wayland app owns the primary selection. Check that X11 thinks we have it. *)
+          let+ owner = X11.Selection.get_owner x11 primary in
+          if owner <> selection_window then (
+            Fmt.failwith "We (%a) are supposed to have the PRIMARY selection, but X11 thinks %a has it!"
+              X11.Window.pp selection_window
+              X11.Window.pp owner;
+          ) else (
+            Log.info (fun f -> f "We own PRIMARY, as expected");
+        )
+      in
+      aux ()
+    in
+    aux ()
+
   (* Create windows for handling selections. Take ownership of the selections (no X clients are running yet,
      so any existing selection must be owned by a Wayland client). This is called once the X connection
      is initialised. *)
@@ -483,6 +511,15 @@ module Selection = struct
       and* () = X11.Selection.set_owner x11 ~owner:(Some clipboard_window) ~timestamp:`CurrentTime clipboard in
       Lwt.wakeup t.set_selection_window selection_window;
       Lwt.wakeup t.set_clipboard_window clipboard_window;
+      Trace.resync_selections := (fun () ->
+          Lwt.async (fun () ->
+              log_selection (fun f -> f "Re-taking ownership of X selections by force!");
+              let* () = X11.Selection.set_owner x11 ~owner:(Some selection_window) ~timestamp:`CurrentTime primary
+              and* () = X11.Selection.set_owner x11 ~owner:(Some clipboard_window) ~timestamp:`CurrentTime clipboard in
+              Lwt.return_unit
+            )
+        );
+      Lwt.async (fun () -> monitor_primary ~selection_window t);
       Lwt.return_unit
     | _ ->
       failwith "Expected exactly one X11 root window!"
@@ -504,6 +541,7 @@ module Selection = struct
     in
     let clipboard_device = Clipboard_mgr.get_data_device clipboard_mgr ~seat @@ clipboard_device ~wayland_clipboard_offer in
     {
+      primary_owner = `Wayland;
       x11;
       relay;
       awaiting_notify = Hashtbl.create 1;

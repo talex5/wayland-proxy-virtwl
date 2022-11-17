@@ -205,6 +205,10 @@ module Selection : sig
     timestamp:[< `CurrentTime | `Time of Display.timestamp ] ->
     unit Lwt.t
 
+  val get_owner :
+    Display.t -> Atom.t ->
+    Window.t Lwt.t
+
   val convert :
     Display.t -> Atom.t ->
     requestor:Window.t ->
