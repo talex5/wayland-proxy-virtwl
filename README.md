@@ -57,38 +57,15 @@ Note: the proxy previously used the virtwl protocol, but virtio-gpu has now repl
 
 ### crosvm setup
 
-For this to work you will need to be using crosvm 99.14468.0.0-rc1 or later on the host.
-Crosvm must be compiled with the `virgl_renderer` feature enabled,
-and run with the `--gpu` option (no extra arguments to the option are needed).
+You will need crosvm R104-14909 or later on the host.
+I use [gitlab:talex5/crosvm](https://gitlab.com/talex5/crosvm/),
+which has some important fixes applied (see the Git log for details).
+It can be run as a Nix flake like this:
 
-Annoyingly, this also causes a console window to appear.
-I didn't find a way to turn this off.
-It probably also exposes some extra attack surface by allowing 3D graphics,
-even though we don't necessarily care about that (needs investigation).
+    nix run 'git+https://gitlab.com/talex5/crosvm.git/?submodules=1'
 
-If `io_uring` support is available on the host, then crosvm will try to use that.
-This support is buggy and crashes after resume from suspend with
-"An error with a uring source: URing::enter: Failed to enter io uring: 4".
-Run crosvm with `ulimit -l 0` to use the older, working system.
-
-But default, crosvm runs the virtio-gpu driver in a sandbox.
-At least on NixOS, this will cause it to crash when it tries to load a `.so` file it needs:
-```
-Stack trace of thread 2:
-#0  0x00007fa5fd0915f6 abort (libc.so.6 + 0x265f6)
-#1  0x00007fa5fcfc6bfd get_dlopen_handle.part.0 (libepoxy.so.0 + 0xc7bfd)
-#2  0x00007fa5fcfc7366 epoxy_egl_dlsym (libepoxy.so.0 + 0xc8366)
-#3  0x00007fa5fcfbf870 egl_single_resolver (libepoxy.so.0 + 0xc0870)
-#4  0x00007fa5fcfc1d2f epoxy_eglQueryString_global_rewrite_ptr
-(libepoxy.so.0 + 0xc2d2f)
-#5  0x0000561703e72ca1 virgl_egl_init (crosvm + 0x3deca1)
-#6  0x0000561703e72221 vrend_winsys_init (crosvm + 0x3de221)
-#7  0x0000561703e380dc virgl_renderer_init (crosvm + 0x3a40dc)
-#8  0x0000561703e35e44
-```
-To avoid this, edit `create_gpu_device` to use `let jail = None;`.
-That runs this driver without a jail, but still runs other devices inside jails
-(and e.g. the shared directories driver doesn't work without a jail).
+You will need to run with `--gpu=context-types=cross-domain:virgl2` to proxy Wayland connections.
+My [qubes-lite][] repository creates the scripts I use to run it, but these will need modifying for other systems.
 
 ### Guest setup
 
@@ -281,3 +258,4 @@ If your interface needs to do things with virtio-gpu, it's probably easiest to g
 [sommelier]: https://chromium.googlesource.com/chromiumos/platform2/+/main/vm_tools/sommelier/
 [ocaml-wayland]: https://github.com/talex5/ocaml-wayland
 [xwayland-blog]: https://roscidus.com/blog/blog/2021/10/30/xwayland/
+[qubes-lite]: https://gitlab.com/talex5/qubes-lite
