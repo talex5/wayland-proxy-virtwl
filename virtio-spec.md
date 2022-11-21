@@ -112,6 +112,6 @@ The system appears to have a number of flaws:
   The guest guesses, by adding 2 to the last ID it knows about, and the host checks its guess.
   If it was wrong (e.g. because the host created a new ID at the same time) then you get a protocol error.
 
-- crosvm's `CrossDomainWorker` appears to try to handle all pending events on each poll,
-  so if Wayland data and pipe data are available at the same time, one event might get overwritten.
-  I haven't confirmed this, however.
+- crosvm's `CrossDomainWorker` handles all pending events on each poll, so if
+  Wayland data and pipe data are available at the same time, one event gets overwritten.
+  Reported at: https://issuetracker.google.com/issues/259268477
