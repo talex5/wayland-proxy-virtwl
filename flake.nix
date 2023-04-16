@@ -15,7 +15,7 @@
         pkgs = nixpkgs.legacyPackages.${system};
         selection =
           opam2nix.packages.${system}.opam2nix.build {
-            ocaml = pkgs.ocaml-ng.ocamlPackages_4_12.ocaml;
+            ocaml = pkgs.ocaml-ng.ocamlPackages_5_0.ocaml;
             selection = ./nix/opam-selection.nix;
             src = ./.;
           };

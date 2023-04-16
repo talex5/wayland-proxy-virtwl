@@ -66,7 +66,7 @@ let listen_x11 ~config ~virtio_gpu x_display =
 
 let env_replace k v l =
   let prefix = k ^ "=" in
-  (prefix ^ v) :: List.filter (fun x -> not (Config.starts_with ~prefix x)) l
+  (prefix ^ v) :: List.filter (fun x -> not (String.starts_with ~prefix x)) l
 
 let main setup_tracing use_virtio_gpu wayland_display x_display config args =
   Lwt_main.run begin
