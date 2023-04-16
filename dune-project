@@ -17,4 +17,4 @@
    (ocaml (>= 5.0.0))
    (fmt (>= 0.8.9))
    conf-pkg-config
-   (wayland (>= 0.2))))
+   (wayland (>= 1.1))))
