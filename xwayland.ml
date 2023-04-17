@@ -216,7 +216,7 @@ module Selection = struct
         List.find_map (fun mime_type ->
             match mime_type with
             | "text/plain" -> Some (mime_type, "UTF8_STRING")
-            | x when Config.starts_with ~prefix:"text/plain;" x -> Some (mime_type, "UTF8_STRING")
+            | x when String.starts_with ~prefix:"text/plain;" x -> Some (mime_type, "UTF8_STRING")
             | _ -> None
           ) targets
         |> Option.value ~default:(target, target)

@@ -6,3 +6,4 @@ depexts: [
   ["libdrm-devel"] {os-family = "suse"}
   ["libdrm"] {os-distribution = "nixos"}
 ]
+available: [os = "linux"]
