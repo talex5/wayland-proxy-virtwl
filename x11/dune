@@ -1,4 +1,4 @@
 (library
   (name x11)
   (preprocess (pps ppx_cstruct))
-  (libraries fmt logs cstruct-lwt))
+  (libraries fmt logs eio))

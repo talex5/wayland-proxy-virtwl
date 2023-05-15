@@ -2,6 +2,6 @@
   (name main)
   (public_name wayland-proxy-virtwl)
   (preprocess (pps ppx_cstruct))
-  (libraries wayland wayland.protocols virtio_gpu cmdliner cstruct-lwt fmt x11))
+  (libraries wayland wayland.protocols virtio_gpu cmdliner fmt x11 eio_main))
 
 (vendored_dirs ocaml-wayland)

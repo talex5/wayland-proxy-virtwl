@@ -1,5 +1,3 @@
-open Lwt.Syntax
-
 type t = Types.window
 type cursor = Types.cursor
 type visual = Types.visual
@@ -95,7 +93,7 @@ module Create = struct
     let depth = 0 in
     let n_attrs = List.length attrs.attrs in
     Log.info (fun f -> f "CreateWindow %a at %a" pp id Geometry.pp geometry);
-    let+ () = Request.send_only t ~major:1 ~minor:depth (sizeof_req + 4 * n_attrs) (fun r ->
+    Request.send_only t ~major:1 ~minor:depth (sizeof_req + 4 * n_attrs) (fun r ->
         set_req_wid r id;
         set_req_parent r parent;
         set_req_x r geometry.x;
@@ -111,8 +109,7 @@ module Create = struct
           );
         set_req_visual r (Option.value visual ~default:0l);
         set_req_bitmask r attrs.bitmask
-      )
-    in
+      );
     id
 end
 
@@ -163,7 +160,7 @@ module GetGeometry = struct
   ]
 
   let send t window =
-    let+ r = Request.send_exn t ~major:14 sizeof_request (fun r -> set_request_window r window) in
+    let r = Request.send_exn t ~major:14 sizeof_request (fun r -> set_request_window r window) in
     let g = { Geometry.
       x = get_reply_x r |> Wire.signed16;
       y = get_reply_y r |> Wire.signed16;
@@ -218,7 +215,7 @@ module GetAttributes = struct
   ]
 
   let send t window =
-    let+ r = Request.send_exn t ~major:3 sizeof_request (fun r -> set_request_window r window) in
+    let r = Request.send_exn t ~major:3 sizeof_request (fun r -> set_request_window r window) in
     let window_class =
       match get_reply_window_class r with
       | 1 -> `InputOutput

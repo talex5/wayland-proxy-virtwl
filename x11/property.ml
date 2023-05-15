@@ -1,6 +1,3 @@
-open Lwt.Syntax
-open Lwt.Infix
-
 let max_transfer_longs = Int32.of_int (4 * 1024 * 1024)      (* 16 MB max chunk size; probably not important *)
 
 type info = {
@@ -44,7 +41,7 @@ module Get = struct
 
   (* Warning: this can fail with ValueError if the property becomes shorter than [long_offset]! *)
   let send t ?(delete=false) ~window ?ty ~long_offset ~long_length property =
-    let+ r = Request.send_exn t ~major:20 ~minor:(Bool.to_int delete) sizeof_req (fun r ->
+    let r = Request.send_exn t ~major:20 ~minor:(Bool.to_int delete) sizeof_req (fun r ->
         set_req_window r window;
         set_req_property r property;
         set_req_ty r (Option.value ty ~default:0l);
@@ -63,7 +60,7 @@ module Get = struct
 end
 
 let get ?delete ?ty ~long_offset ~long_length t window property =
-  let+ info = Get.send t ?delete ~window ?ty ~long_offset ~long_length property in
+  let info = Get.send t ?delete ~window ?ty ~long_offset ~long_length property in
   Log.info (fun f -> f "GetProperty %a/%a => %a" Xid.pp window (Atom.pp t) property
                (Fmt.option ~none:Fmt.(any "(unset)") (pp_info t)) info
            );
@@ -71,17 +68,17 @@ let get ?delete ?ty ~long_offset ~long_length t window property =
 
 let get_all ?delete ?ty t window property =
   let rec aux ~long_offset =
-    Get.send ?delete ?ty t ~window property ~long_offset ~long_length:max_transfer_longs >>= function
-    | None -> Lwt.return None
-    | Some d when d.bytes_after = 0 -> Lwt.return (Some [d.value])
+    match Get.send ?delete ?ty t ~window property ~long_offset ~long_length:max_transfer_longs with
+    | None -> None
+    | Some d when d.bytes_after = 0 -> Some [d.value]
     | Some d ->
       let long_offset = Int32.add long_offset (Int32.of_int (Cstruct.length d.value / 4)) in
-      aux ~long_offset >|= Option.map (fun ds -> d.value :: ds)
+      aux ~long_offset |> Option.map (fun ds -> d.value :: ds)
   in
-  aux ~long_offset:0l >|= Option.map Cstruct.concat
+  aux ~long_offset:0l |> Option.map Cstruct.concat
 
 let get_string ?delete t window property =
-  let+ reply = get_all ?delete t window property in
+  let reply = get_all ?delete t window property in
   match reply with
   | None ->
     Log.info (fun f -> f "GetProperty %a/%a => (unset)" Xid.pp window (Atom.pp t) property);
@@ -93,7 +90,7 @@ let get_string ?delete t window property =
     Some s
 
 let get_atoms ?delete t window property =
-  let+ data = get_all ?delete t window property in
+  let data = get_all ?delete t window property in
   let atoms =
     match data with
     | None -> []
@@ -108,7 +105,7 @@ let get_atoms ?delete t window property =
   atoms
 
 let get_atom ?delete t window property =
-  get_atoms ?delete t window property >|= function
+  match get_atoms ?delete t window property with
   | [] -> None
   | [x] -> Some x
   | atoms -> Fmt.failwith "Expected only a single atom in property %a, got %a"
@@ -118,7 +115,7 @@ let get_atom ?delete t window property =
 let pp_length f cs = Fmt.pf f "%d bytes" (Cstruct.length cs)
 
 let get_all ?delete ?ty t window property =
-  let+ data = get_all ?delete ?ty t window property in
+  let data = get_all ?delete ?ty t window property in
   Log.info (fun f -> f "GetProperty %a/%a => %a" Xid.pp window (Atom.pp t) property
                (Fmt.option ~none:Fmt.(any "(unset)") pp_length) data
            );

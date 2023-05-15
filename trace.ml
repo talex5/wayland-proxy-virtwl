@@ -1,5 +1,5 @@
-open Lwt.Syntax
-open Lwt.Infix
+open Eio.Std
+
 open Wayland
 
 let motion = ref true
@@ -141,25 +141,23 @@ module Ring_buffer = struct
     flush ch
 end
 
-let create_ring_control_socket ~wayland_display ring =
+let create_ring_control_socket ~sw ~fs ~wayland_display ring =
   let ring_buffer_log_ctl = Printf.sprintf "/run/user/%d/%s-ctl" (Unix.getuid ()) wayland_display in
   if Sys.file_exists ring_buffer_log_ctl then Unix.unlink ring_buffer_log_ctl;
-  let* () = Lwt_unix.mkfifo ring_buffer_log_ctl 0o600 in
-  Lwt.async (fun () ->
-      let open_pipe () = Lwt_io.(open_file ~mode:input) ring_buffer_log_ctl ~flags:Lwt_unix.[O_CLOEXEC] in
-      let rec aux pipe =
-        Lwt_io.read_line_opt pipe >>= function
-        | Some cmd ->
-          Log.warn (fun f -> f "Got command on %S: %S (dumping log)" ring_buffer_log_ctl cmd);
-          Ring_buffer.flush_to_file ring;
-          aux pipe
-        | None ->
-          let* () = Lwt_io.close pipe in
-          open_pipe () >>= aux
-      in
-      open_pipe () >>= aux
-    );
-  Lwt.return_unit
+  Unix.mkfifo ring_buffer_log_ctl 0o600;
+  let ring_buffer_log_ctl = (fs, ring_buffer_log_ctl) in
+  Fiber.fork_daemon ~sw (fun () ->
+      while true do
+        Eio.Path.with_open_in ring_buffer_log_ctl @@ fun pipe ->
+        match Eio.Buf_read.(parse line) pipe ~max_size:1024 with
+        | Ok cmd ->
+          Log.warn (fun f -> f "Got command on %a: %S (dumping log)" Eio.Path.pp ring_buffer_log_ctl cmd);
+          Ring_buffer.flush_to_file ring
+        | Error (`Msg e) ->
+          Log.warn (fun f -> f "No command on %a: %s" Eio.Path.pp ring_buffer_log_ctl e);
+      done;
+      assert false
+    )
 
 let ms_of_time x = (truncate (x *. 1000.)) mod 1000
 
@@ -195,21 +193,10 @@ let reporter ring =
   in
   { Logs.report = report }
 
-let handle_async_error ~ring ex =
-  let bt = Printexc.get_raw_backtrace () in
-  Log.err (fun f -> f "Uncaught async exception: %a" Fmt.exn_backtrace (ex, bt));
-  Option.iter Ring_buffer.flush_to_file ring
-
-let setup_logging ~verbose ~log_suppress ~log_ring_file ~log_ring_size ~wayland_display =
+let setup_logging ~sw ~fs ~verbose ~log_suppress ~log_ring_file ~log_ring_size ~wayland_display =
   let ring = Option.map (Ring_buffer.create ~log_ring_size) log_ring_file in
-  Lwt.async_exception_hook := handle_async_error ~ring;
   Logs.set_reporter (reporter ring);
-  let* () =
-    match ring with
-    | Some ring -> create_ring_control_socket ~wayland_display ring
-    | None -> Lwt.return_unit
-  in
-  Printexc.record_backtrace true;
+  Option.iter (create_ring_control_socket ~sw ~fs ~wayland_display) ring;
   let log_level = if verbose then Logs.Info else Logs.Warning in
   Logs.(set_level (Some log_level));
   let wayland_env, wayland =
@@ -237,8 +224,7 @@ let setup_logging ~verbose ~log_suppress ~log_ring_file ~log_ring_size ~wayland_
       | `Region -> region := false
       | `Drawing -> drawing := false
       | `Hints -> hints := false
-    );
-  Lwt.return_unit
+    )
 
 open Cmdliner
 
@@ -279,8 +265,8 @@ let log_ring_size =
     ~doc:"Size of the log ring buffer (if used)"
     ["log-ring-size"]
 
-let cmdliner =
+let cmdliner ~sw ~fs =
   let make verbose log_suppress log_ring_file log_ring_size ~wayland_display =
-    setup_logging ~verbose ~log_suppress ~log_ring_file ~log_ring_size ~wayland_display
+    setup_logging ~sw ~fs ~verbose ~log_suppress ~log_ring_file ~log_ring_size ~wayland_display
   in
   Term.(const make $ verbose $ log_suppress $ log_ring_file $ log_ring_size)

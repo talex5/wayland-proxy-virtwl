@@ -5,11 +5,11 @@ type fmt = Drm_format.t * modifiers
 
 type t
 
-val create : Wayland.Client.t -> Wayland.Registry.t -> t option Lwt.t
+val create : Wayland.Client.t -> Wayland.Registry.t -> t option
 (** [create wayland reg] gets a Linux_dmabuf_unstable_v1 from the registry and
     collects the supported formats. Returns [None] if this interface is missing. *)
 
-val probe_drm : t -> Dev.image -> bool Lwt.t
+val probe_drm : t -> Dev.image -> bool
 (** [probe_drm t img] tries to create a test Wl_buffer from [img].
     Returns [true] iff this succeeds, indicating that we have access to video memory. *)
 

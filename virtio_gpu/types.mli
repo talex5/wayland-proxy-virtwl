@@ -96,8 +96,8 @@ end
 module Cross_domain_read_write : sig
   type t = [`Write_pipe] to_host
 
-  val create : id:Res_handle.t -> bytes -> len:int -> t
-  (** [create ~id buf ~len] is a message telling the host to write [buf[:len]] to host pipe [id]. *)
+  val create : id:Res_handle.t -> Cstruct.t -> t
+  (** [create ~id buf] is a message telling the host to write [buf] to host pipe [id]. *)
 end
 
 module Cross_domain_image_requirements : sig
@@ -137,4 +137,8 @@ module Wayland_ring : sig
         the ring is reused. For each attached FD, it returns the resource ID, type and size.
       @param read_pipe
         This asks us to write data to a guest pipe. If [hang_up = true] then the pipe should be closed. *)
+end
+
+module Event : sig
+  val check : Cstruct.t -> unit
 end

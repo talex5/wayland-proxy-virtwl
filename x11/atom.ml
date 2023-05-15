@@ -1,4 +1,4 @@
-open Lwt.Syntax
+open Eio.Std
 
 type t = Types.atom
 
@@ -24,7 +24,7 @@ module Intern = struct
 
   let send t ~only_if_exists name =
     let len = sizeof_request + Wire.round_up4 (String.length name) in
-    let+ r = Request.send_exn t ~major:16 ~minor:(Bool.to_int only_if_exists) len (fun r ->
+    let r = Request.send_exn t ~major:16 ~minor:(Bool.to_int only_if_exists) len (fun r ->
         set_request_name_len r (String.length name);
         Cstruct.blit_from_string name 0 r sizeof_request (String.length name)
       )
@@ -45,16 +45,19 @@ end
 
 let intern (t:Types.display) ?(only_if_exists=false) name =
   match Hashtbl.find_opt t.atoms name with
-  | Some x -> x
+  | Some x -> Promise.await_exn x
   | None ->
     Log.info (fun f -> f "Intern %S" name);
     let atom =
-      let+ atom = Intern.send t ~only_if_exists name in
-      Hashtbl.add t.atom_names atom name;
-      atom
+      Fiber.fork_promise ~sw:t.sw
+        (fun () ->
+           let atom = Intern.send t ~only_if_exists name in
+           Hashtbl.add t.atom_names atom name;
+           atom
+        )
     in
     Hashtbl.add t.atoms name atom;
-    atom
+    Promise.await_exn atom
 
 module GetName = struct
   [%%cstruct
@@ -75,16 +78,16 @@ module GetName = struct
   ]
 
   let send t atom =
-    let+ r = Request.send_exn t ~major:17 sizeof_req (fun r -> set_req_atom r atom) in
+    let r = Request.send_exn t ~major:17 sizeof_req (fun r -> set_req_atom r atom) in
     let len = get_reply_name_len r in
     Cstruct.to_string r ~off:sizeof_reply ~len
 end
 
 let get_name (t:Types.display) atom =
   match Hashtbl.find_opt t.atom_names atom with
-  | Some name -> Lwt.return name
+  | Some name -> name
   | None ->
-    let+ name = GetName.send t atom in
+    let name = GetName.send t atom in
     Hashtbl.replace t.atom_names atom name;
     name
 

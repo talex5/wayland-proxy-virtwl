@@ -1,6 +1,3 @@
-open Lwt.Syntax
-open Lwt.Infix
-
 module Wm_normal_hints = struct
   [%%cenum
     type flags =
@@ -40,9 +37,9 @@ module Wm_normal_hints = struct
   let default = Cstruct.create sizeof_t
 
   let get x11 window =
-    let* wm_normal_hints = Atom.intern x11 "WM_NORMAL_HINTS" in
+    let wm_normal_hints = Atom.intern x11 "WM_NORMAL_HINTS" in
     let long_length = Int32.of_int (sizeof_t / 4) in
-    Property.get x11 window wm_normal_hints ~long_offset:0l ~long_length >|= function
+    match Property.get x11 window wm_normal_hints ~long_offset:0l ~long_length with
     | None -> default
     | Some info when Cstruct.length info.value >= sizeof_t -> info.value
     | Some _ ->

@@ -1,5 +1,3 @@
-open Lwt.Syntax
-
 type t = {
   x11 : Display.t;
   major_opcode : int;
@@ -26,7 +24,7 @@ module QueryVersion = struct
   ]
 
   let send t ~major_opcode (client_major_version, client_minor_version) =
-    let+ r = Request.send_exn t ~major:major_opcode ~minor:0 sizeof_req (fun r ->
+    let r = Request.send_exn t ~major:major_opcode ~minor:0 sizeof_req (fun r ->
         set_req_client_major_version r client_major_version;
         set_req_client_minor_version r client_minor_version
       )
@@ -55,8 +53,8 @@ end
 let redirect_subwindows = Redirect_subwindows.send
 
 let init t =
-  let* { major_opcode } = Extension.query_exn t "Composite" in
+  let { Extension.major_opcode } = Extension.query_exn t "Composite" in
   Log.info (fun f -> f "Composite extension has major opcode %d" major_opcode);
-  let* (maj, min) = QueryVersion.send t ~major_opcode (0l, 3l) in
+  let (maj, min) = QueryVersion.send t ~major_opcode (0l, 3l) in
   Log.info (fun f -> f "Using Composite protocol version %ld.%ld" maj min);
-  Lwt.return { x11 = t; major_opcode }
+  { x11 = t; major_opcode }

@@ -11,10 +11,11 @@
  (depends
    (logs (>= 0.7.0))
    (cmdliner (>= 1.1.0))
-   (cstruct (>= 6.0.0))
-   (cstruct-lwt (>= 6.0.0))
-   (ppx_cstruct (>= 6.0.0))
+   (cstruct (>= 6.2.0))
+   (eio (>= 0.12))
+   (eio_main (>= 0.12))
+   (ppx_cstruct (>= 6.2.0))
    (ocaml (>= 5.0.0))
    (fmt (>= 0.8.9))
    conf-pkg-config
-   (wayland (and (>= 1.1) (< 2.0)))))
+   (wayland (>= 2.0))))
