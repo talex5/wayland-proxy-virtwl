@@ -6,8 +6,9 @@
    Since we're relaying, we know that both sides are using the same version, so if we get e.g. a
    version 5 request from the client then we know it's safe to send it to the host. *)
 
-open Lwt.Syntax
 open Wayland
+
+open Eio.Std
 
 (* Since we're just relaying messages, we mostly don't care about checking version compatibility.
    e.g. if a client sends us a v5 message, then we can assume the corresponding server object
@@ -43,7 +44,7 @@ type xwayland_hooks = <
     surface:([< `V1 | `V2 | `V3 | `V4 | `V5] as 'v) H.Wl_surface.t ->
     unit;
 
-  set_ping : (unit -> unit Lwt.t) -> unit;
+  set_ping : (unit -> unit) -> unit;
 
   scale : int32;
 >
@@ -73,13 +74,14 @@ let point_to_client ~xwayland (x, y) =
       Fixed.of_bits (Int32.mul (Fixed.to_bits y) scale)
     )
 
-type transport = < S.transport; close:unit Lwt.t >
+type transport = < S.transport; close:unit >
 
 type t = {
+  sw : Switch.t;
   config : Config.t;
   virtio_gpu : Virtio_gpu.t option;
   host_transport : transport;
-  host_closed : (unit, exn) Lwt_result.t;
+  host_closed : unit Eio.Promise.or_exn;
   host_display : Client.t;
   host_registry : Wayland.Registry.t;
   mutable last_serial : int32;
@@ -266,8 +268,8 @@ module Shm : sig
 end = struct
   type mapping = {
     host_pool : [`V1] H.Wl_shm_pool.t;
-    client_memory_pool : Lwt_bytes.t;   (* The client's memory mapped into our address space *)
-    host_memory_pool : Lwt_bytes.t;     (* The host's memory mapped into our address space *)
+    client_memory_pool : Cstruct.buffer;   (* The client's memory mapped into our address space *)
+    host_memory_pool : Cstruct.buffer;     (* The host's memory mapped into our address space *)
   }
 
   type t = {
@@ -876,10 +878,10 @@ let make_xdg_wm_base ~xwayland ~tag bind proxy =
   xwayland |> Option.iter (fun (x:xwayland_hooks) ->
       x#set_ping (fun () ->
           let serial = 0l in
-          let pong, set_pong = Lwt.wait () in
-          Queue.add (fun ~serial:_ -> Lwt.wakeup set_pong ()) pong_handlers;
+          let pong, set_pong = Promise.create () in
+          Queue.add (fun ~serial:_ -> Promise.resolve set_pong ()) pong_handlers;
           C.Xdg_wm_base.ping proxy ~serial;
-          pong
+          Promise.await pong
         )
     )
 
@@ -1261,35 +1263,36 @@ let make_registry ~xwayland t reg =
       C.Wl_registry.global reg ~name:(Int32.of_int name) ~interface:M.interface ~version
     )
 
-let create ?virtio_gpu (config : Config.t) =
-  let* host_transport =
+let create ?virtio_gpu ~sw ~net (config : Config.t) =
+  let host_transport =
     match virtio_gpu with
     | Some virtio_gpu ->
-      let+ host_transport = Virtio_gpu.connect_wayland virtio_gpu in
+      let host_transport = Virtio_gpu.connect_wayland ~sw virtio_gpu in
       (host_transport :> transport)
     | None ->
-      let+ host_transport = Wayland.Unix_transport.connect () in
+      let host_transport = Wayland.Unix_transport.connect ~sw ~net () in
       (host_transport :> transport)
   in
-  let host_display, host_closed = Wayland.Client.connect ~trace:(module Trace.Host) host_transport in
-  let* host_registry = Wayland.Registry.of_display host_display in
-  let* _dma =
+  let host_display, host_closed = Wayland.Client.connect ~sw ~trace:(module Trace.Host) host_transport in
+  let host_registry = Wayland.Registry.of_display host_display in
+  let _dma =
     match virtio_gpu with
-    | None -> Lwt.return_none
+    | None -> None
     | Some virtio_gpu ->
-      let* dma = Virtio_gpu.Wayland_dmabuf.create host_display host_registry in
+      let dma = Virtio_gpu.Wayland_dmabuf.create host_display host_registry in
       match dma with
       | None ->
         Log.info (fun f -> f "Host does not support dmabuf");
-        Lwt.return_none
+        None
       | Some dma ->
-        let+ supported = Virtio_gpu.probe_drm virtio_gpu dma in
+        let supported = Virtio_gpu.probe_drm virtio_gpu dma in
         if supported then (
           Log.warn (fun f -> f "Host is using dmabuf - this probably won't work yet");
           Some dma
         ) else None
   in
-  Lwt.return {
+  {
+    sw;
     virtio_gpu;
     host_transport;
     host_closed;
@@ -1302,7 +1305,7 @@ let create ?virtio_gpu (config : Config.t) =
 let accept ?xwayland t client =
   let client_transport = Wayland.Unix_transport.of_socket client in
   let s : Server.t =
-    Server.connect client_transport ~trace:(module Trace.Client) @@ object
+    Server.connect ~sw:t.sw client_transport ~trace:(module Trace.Client) @@ object
       inherit [_] C.Wl_display.v1
       method on_get_registry _ ref = make_registry ~xwayland t ref
       method on_sync _ cb =
@@ -1317,31 +1320,28 @@ let accept ?xwayland t client =
     end
   in
   let is_active = ref true in
-  let client_done =
-    let* r = Server.closed s in
-    if !is_active then (
-      Log.info (fun f -> f "Client %a" pp_closed r);
-      is_active := false;
-      t.host_transport#shutdown
-    ) else Lwt.return_unit
-  in
-  let host_done =
-    let* r = t.host_closed in
-    if !is_active then (
-      Log.info (fun f -> f "Host %a" pp_closed r);
-      is_active := false;
-      client_transport#shutdown
-    ) else Lwt.return_unit
-  in
-  let* () = Lwt.choose [client_done; host_done] in
-  let* () = t.host_transport#close in
+  Fiber.both
+    (fun () ->
+       let r = Promise.await (Server.closed s) in
+       if !is_active then (
+         Log.info (fun f -> f "Client %a" pp_closed r);
+         is_active := false;
+         t.host_transport#shutdown
+       )
+    )
+    (fun () ->
+       let r = Promise.await t.host_closed in
+       if !is_active then (
+         Log.info (fun f -> f "Host %a" pp_closed r);
+         is_active := false;
+         client_transport#shutdown
+       )
+    );
+  t.host_transport#close
   (* Note: we don't close the client; the caller does that *)
-  Lwt.return_unit
 
 let registry t = t.host_registry
 let last_serial t = t.last_serial
-
-let set_from_host_paused t = Wayland.Client.set_paused t.host_display
 
 let dump f t =
   Client.dump f t.host_display

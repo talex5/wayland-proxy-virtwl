@@ -1,5 +1,6 @@
 open Types
-open Lwt.Syntax
+
+module Read = Eio.Buf_read
 
 type t = Types.display
 type timestamp = Types.timestamp
@@ -12,8 +13,7 @@ let mint_id t =
   t.last_resource_id <- Int32.succ t.last_resource_id;
   t.last_resource_id
 
-let card16 x =
-  Lwt_io.block x 2 (fun buf ofs -> Lwt.return (EndianBigstring.LittleEndian.get_uint16 buf ofs))
+let card16 = Read.LE.uint16
 
 module Connection_setup = struct
   [%%cstruct
@@ -127,13 +127,14 @@ module Connection_setup = struct
   }
 
   let read_response from_wm =
-    let* r = Lwt_io.read_char from_wm in
+    let r = Read.any_char from_wm in
     if Char.code r <> 1 then failwith "Xwayland handshake failed!";
-    let* _ = Lwt_io.read_char from_wm in  (* unused *)
-    let* version_major = card16 from_wm in
-    let* version_minor = card16 from_wm in
-    let* len4 = card16 from_wm in
-    let* resp = Wire.read_exactly (len4 * 4) from_wm in
+    Read.skip 1 from_wm;  (* unused *)
+    let version_major = card16 from_wm in
+    let version_minor = card16 from_wm in
+    let len4 = card16 from_wm in
+    Read.ensure from_wm (len4 * 4);
+    let resp = Read.peek from_wm in
     let from_vendor = Cstruct.shift resp sizeof_response in
     let vendor = Cstruct.to_string from_vendor ~len:(get_response_vendor_length resp) in
     let resource_id_base = get_response_resource_id_base resp in
@@ -167,19 +168,21 @@ module Connection_setup = struct
     let roots = ref [] in
     let rest = dump_screens ~roots from_screens (get_response_n_screens resp) in
     assert (Cstruct.length rest = 0);
-    Lwt.return {
+    Read.consume from_wm (len4 * 4);
+    {
       roots = !roots;
       resource_id_base;
       resource_id_mask;
     }
 end
 
-let connect socket =
-  let from_server = Lwt_io.of_fd socket ~mode:Lwt_io.input ~close:Lwt.return in
-  let* () = Lwt_cstruct.(complete (write socket) Connection_setup.request) in
-  let* reply = Connection_setup.read_response from_server in
-  Lwt.return {
-    socket;
+let connect ~sw socket =
+  let from_server = Read.of_flow socket ~max_size:max_int in
+  Eio.Flow.write socket [Connection_setup.request];
+  let reply = Connection_setup.read_response from_server in
+  {
+    sw;
+    socket = (socket :> Eio.Flow.two_way);
     from_server;
     next_seq = 1;
     pending = Queue.create ();
@@ -188,13 +191,13 @@ let connect socket =
     atom_names = Hashtbl.create 10;
     last_resource_id = reply.resource_id_base;
     need_sync = false;
-    wake_input = Lwt_condition.create ();
-    send_mutex = Lwt_mutex.create ();
+    wake_input = Eio.Condition.create ();
+    send_mutex = Eio.Mutex.create ();
   }
 
 let sync t =
   Log.info (fun f -> f "Sync");
   (* Confusingly, we want [send] not [send_sync] here,
      because we want to wait for a round-trip. *)
-  let+ _ = Atom.Intern.send t ~only_if_exists:true "SYNC" in
+  let _ : timestamp = Atom.Intern.send t ~only_if_exists:true "SYNC" in
   Log.info (fun f -> f "Sync done")

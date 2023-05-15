@@ -1,5 +1,6 @@
-open Lwt.Syntax
-open Lwt.Infix
+[@@@warning "-32"]
+
+open Eio.Std
 
 let min_respawn_time = 10.0             (* Don't run Xwayland more than once per 10s *)
 
@@ -64,13 +65,14 @@ let pp_paired f { window; xdg_surface; xdg_role; geometry; override_redirect } =
     (if override_redirect then "(override-redirect)" else "")
 
 type t = {
+  sw : Switch.t;
   relay : Relay.t;
-  x11 : X11.Display.t Lwt.t;
+  x11 : X11.Display.t Promise.or_exn;
   config : Config.t;
   wm_base : [`V1] Xdg_wm_base.t;
   decor_mgr : [`V1] Xdg_decor_mgr.t option;
   unpaired : (int32, unpaired) Hashtbl.t;         (* Client-side Wayland ID -> details *)
-  unpaired_added : unit Lwt_condition.t;          (* Fires when [unpaired] gets a new entry. *)
+  unpaired_added : Eio.Condition.t;               (* Fires when [unpaired] gets a new entry. *)
   paired : (X11.Window.t, paired) Hashtbl.t;      (* X11 ID -> details *)
 
   mutable pointer_surface : paired option;        (* A member of [of_host_surface] *)
@@ -79,7 +81,7 @@ type t = {
 
   (* This is set when Xwayland creates the xdg_wm_base. We need it to sync the two connections.
      Xwayland doesn't actually need this in rootless mode, but luckily for us it creates it anyway. *)
-  mutable wayland_ping : unit -> unit Lwt.t;
+  mutable wayland_ping : unit -> unit;
 }
 
 let scale_to_client t (x, y) =
@@ -92,7 +94,7 @@ let scale_to_host t (x, y) =
   (y + t.config.xunscale - 1) / t.config.xunscale
 
 let intern ?only_if_exists t name =
-  let* x11 = t.x11 in
+  let x11 = Promise.await_exn t.x11 in
   X11.Atom.intern ?only_if_exists x11 name
 
 module Selection = struct
@@ -132,20 +134,21 @@ module Selection = struct
   }
 
   type t = {
-    x11 : X11.Display.t Lwt.t;
+    sw : Eio.Switch.t;
+    x11 : X11.Display.t Promise.or_exn;
     wayland_primary_offer : [`V1] Primary_offer.t option ref;
     wayland_clipboard_offer : [`V1|`V2|`V3] Clipboard_offer.t option ref;
     primary_selection : ([`V1] Primary_mgr.t * [`V1] Primary_device.t) option;
     clipboard_mgr : [`V1] Clipboard_mgr.t;
     clipboard_device : [`V1] Clipboard_device.t;
-    selection_window : X11.Window.t Lwt.t;
-    set_selection_window : X11.Window.t Lwt.u;
-    clipboard_window : X11.Window.t Lwt.t;
-    set_clipboard_window : X11.Window.t Lwt.u;
+    selection_window : X11.Window.t Promise.t;
+    set_selection_window : X11.Window.t Promise.u;
+    clipboard_window : X11.Window.t Promise.t;
+    set_clipboard_window : X11.Window.t Promise.u;
     relay : Relay.t;
 
     (* When we request an X11 selection, we add the callback for the response here. *)
-    awaiting_notify : (notify_key, (X11.Display.timestamp * X11.Atom.t) option -> unit Lwt.t) Hashtbl.t;
+    awaiting_notify : (notify_key, (X11.Display.timestamp * X11.Atom.t) option -> unit) Hashtbl.t;
   }
 
   (* Object to keep track of the current Wayland primary selection (updates [wayland_primary_offer]). *)
@@ -227,10 +230,11 @@ module Selection = struct
 
   (* An X application wants to get the Wayland selection/clipboard. *)
   let selection_request t ~time ~owner:_ ~requestor ~selection ~target ~property =
-    Lwt.async (fun () ->
-        let* x11 = t.x11 in
-        let* primary = X11.Atom.intern x11 "PRIMARY" in
-        let* clipboard = X11.Atom.intern x11 "CLIPBOARD" in
+    Fiber.fork ~sw:t.sw
+      (fun () ->
+        let x11 = Promise.await_exn t.x11 in
+        let primary = X11.Atom.intern x11 "PRIMARY" in
+        let clipboard = X11.Atom.intern x11 "CLIPBOARD" in
         let reply property = X11.Selection.notify x11 selection ~time:(`Time time) ~requestor ~target ~property in
         let property = Option.value property ~default:target in (* For old clients; see ICCCM *)
         let offer =
@@ -244,33 +248,29 @@ module Selection = struct
           Log.info (fun f -> f "No Wayland %a offer - rejecting request" (X11.Atom.pp x11) selection);
           reply None
         | Some (receive, targets) ->
-          let* mime_type, reply_target = X11.Atom.get_name x11 target >|= mime_type_of_target ~targets in
+          let mime_type, reply_target = X11.Atom.get_name x11 target |> mime_type_of_target ~targets in
           if List.mem mime_type targets then (
-            let r, w = Unix.pipe () in
-            let r = Lwt_io.(of_unix_fd ~mode:input) r in    (* Will close [r] *)
-            Lwt.try_bind
-              (fun () ->
-                 receive ~mime_type ~fd:w;        (* Tell Wayland app to write to [w]. *)
-                 Unix.close w;
-                 Lwt_io.read r
-              )
-              (fun data ->
-                 let* () = Lwt_io.close r in
-                 let* reply_target = X11.Atom.intern x11 reply_target in
-                 let* () = X11.Property.set_string ~ty:reply_target x11 requestor property data in
-                 reply (Some property)
-              )
-              (fun ex ->
-                 let* () = Lwt_io.close r in
-                 Log.warn (fun f -> f "Error reading selection data from host: %a" Fmt.exn ex);
-                 reply None
-              )
+            match
+              Switch.run @@ fun sw ->
+              let r, w = Eio_unix.pipe sw in
+              Eio_unix.Fd.use_exn "selection_request" (Eio_unix.Resource.fd w) (fun w ->
+                  receive ~mime_type ~fd:w;        (* Tell Wayland app to write to [w]. *)
+                );
+              Eio.Flow.close w;
+              Eio.Buf_read.(parse_exn take_all) r ~max_size:max_int
+            with
+            | data ->
+              let reply_target = X11.Atom.intern x11 reply_target in
+              let () = X11.Property.set_string ~ty:reply_target x11 requestor property data in
+              reply (Some property)
+            | exception ex ->
+              Log.warn (fun f -> f "Error reading selection data from host: %a" Fmt.exn ex);
+              reply None
           ) else (
             Log.info (fun f -> f "Request for unavailable MIME type %S - rejecting" mime_type);
             reply None
           )
-      );
-    Lwt.return_unit
+      )
 
   (* Call [fn] when we get the next SelectionNotify for [selection].
      If we were already waiting for one, cancel it. *)
@@ -280,9 +280,9 @@ module Selection = struct
     let old = Hashtbl.find_opt t.awaiting_notify key in
     Hashtbl.replace t.awaiting_notify key fn;
     match old with
-    | None -> Lwt.return_unit
+    | None -> ()
     | Some fn ->
-      let* x11 = t.x11 in
+      let x11 = Promise.await_exn t.x11 in
       Log.info (fun f -> f "Started a new transfer for %a; cancelling existing one" (X11.Atom.pp x11) selection);
       fn None
 
@@ -293,33 +293,28 @@ module Selection = struct
       | None -> Log.warn (fun f -> f "Unexpected SelectionNotify!")
       | Some fn ->
         Hashtbl.remove t.awaiting_notify key;
-        Lwt.async (fun () -> property |> Option.map (fun p -> (time, p)) |> fn)
-    end;
-    Lwt.return_unit
+        Fiber.fork ~sw:t.sw (fun () -> property |> Option.map (fun p -> (time, p)) |> fn)
+    end
 
   (* Request a selection, wait for the transfer, and return the data. *)
   let fetch_selection t ?(time=`CurrentTime) ~requestor ~property ~target selection =
-    let* x11 = t.x11 in
-    let data, set_data = Lwt.wait () in
-    let* () = on_selection_notify t ~selection ~target (function
+    let x11 = Promise.await_exn t.x11 in
+    let data, set_data = Promise.create () in
+    on_selection_notify t ~selection ~target (function
         | Some (_, p) when p = property ->
-          let* d = X11.Property.get_all ~delete:true x11 requestor property in
-          Lwt.wakeup set_data d;
-          Lwt.return_unit
+          let d = X11.Property.get_all ~delete:true x11 requestor property in
+          Promise.resolve set_data d
         | _ ->
           Log.warn (fun f -> f "X selection request rejected");
-          Lwt.wakeup set_data None;
-          Lwt.return_unit
-      )
-    in
-    let* () = X11.Property.delete x11 requestor property in
-    let* () = X11.Selection.convert x11 selection
+          Promise.resolve set_data None
+      );
+    X11.Property.delete x11 requestor property;
+    X11.Selection.convert x11 selection
         ~requestor
         ~target
         ~property:(Some property)
-        ~time
-    in
-    data
+        ~time;
+    Promise.await data
 
   let parse_targets x11 value =
     let rec to_atoms data =
@@ -329,46 +324,46 @@ module Selection = struct
         atom :: to_atoms (Cstruct.shift data 4)
       )
     in
-    value |> to_atoms |> Lwt_list.map_p (X11.Atom.get_name x11)
+    value |> to_atoms |> Fiber.List.map (X11.Atom.get_name x11)
 
   (* Fetch an X selection from an X client and write it to [dst].
      [dst] will be closed afterwards. *)
   let send_x_selection t selection ~via:requestor ~mime_type ~dst =
-    let w = Lwt_io.(of_unix_fd ~mode:output) dst in        (* Will close dst *)
-    Lwt.async (fun () ->
-        Lwt.finalize
+    let w = Eio_unix.Net.import_socket_stream ~sw:t.sw ~close_unix:true dst in        (* Will close dst *)
+    Fiber.fork ~sw:t.sw (fun () ->
+        Fun.protect
           (fun () ->
-             let* x11 = t.x11 in
-             let* target = X11.Atom.intern x11 mime_type in
-             fetch_selection t ~requestor ~property:target ~target selection >>= function
+             let x11 = Promise.await_exn t.x11 in
+             let target = X11.Atom.intern x11 mime_type in
+             match fetch_selection t ~requestor ~property:target ~target selection with
              | Some data ->
-               Lwt_io.write w (Cstruct.to_string data)
+               Eio.Flow.write w [data]
              | None ->
-               Log.warn (fun f -> f "X selection property not available!");
-               Lwt.return_unit
+               Log.warn (fun f -> f "X selection property not available!")
           )
-          (fun () -> Lwt_io.close w)
+          ~finally:(fun () -> Eio.Flow.close w)
       )
 
   (* We lost our ownership of the X selection. This means that an X client now owns the selection.
      Tell Wayland that we can now provide that selection to it. *)
   let set_x_owned_primary t =
     match t.primary_selection with
-    | None -> Lwt.return_unit
+    | None -> ()
     | Some (primary_selection_mgr, primary_device) ->
-      let* x11 = t.x11 in
+      let x11 = Promise.await_exn t.x11 in
       (* Find out what targets the X app is offering *)
-      let* primary = X11.Atom.intern x11 "PRIMARY" in
-      let* targets_atom = X11.Atom.intern x11 "TARGETS" in
-      let* requestor = t.selection_window in
-      let* targets =
-        fetch_selection t primary
-          ~requestor
-          ~target:targets_atom
-          ~property:targets_atom
-        >>= function
+      let primary = X11.Atom.intern x11 "PRIMARY" in
+      let targets_atom = X11.Atom.intern x11 "TARGETS" in
+      let requestor = Promise.await t.selection_window in
+      let targets =
+        match
+          fetch_selection t primary
+            ~requestor
+            ~target:targets_atom
+            ~property:targets_atom
+        with
         | Some x -> parse_targets x11 x
-        | None -> Lwt.return []
+        | None -> []
       in
       (* Create a Wayland source offering those targets *)
       let source = Primary_mgr.create_source primary_selection_mgr @@ object
@@ -380,31 +375,31 @@ module Selection = struct
 
           method on_cancelled self =
             Log.info (fun f -> f "X selection source cancelled by Wayland - X app no longer owns selection");
-            Lwt.async (fun () ->
+            Fiber.fork ~sw:t.sw (fun () ->
                 X11.Selection.set_owner x11 ~owner:(Some requestor) ~timestamp:`CurrentTime primary
               );
             Primary_source.destroy self
         end
       in
       targets |> List.iter (fun mime_type -> Primary_source.offer source ~mime_type);
-      Primary_device.set_selection primary_device ~source:(Some source) ~serial:(Relay.last_serial t.relay);
-      Lwt.return_unit
+      Primary_device.set_selection primary_device ~source:(Some source) ~serial:(Relay.last_serial t.relay)
 
   (* Similar to {!set_x_owned_primary}, but for Wayland's clipboard API. *)
   let set_x_owned_clipboard t =
-    let* x11 = t.x11 in
+    let x11 = Promise.await_exn t.x11 in
     (* Find out what targets the X app is offering *)
-    let* clipboard = X11.Atom.intern x11 "CLIPBOARD" in
-    let* targets_atom = X11.Atom.intern x11 "TARGETS" in
-    let* requestor = t.clipboard_window in
-    let* targets =
-      fetch_selection t clipboard
-        ~requestor
-        ~target:targets_atom
-        ~property:targets_atom
-      >>= function
+    let clipboard = X11.Atom.intern x11 "CLIPBOARD" in
+    let targets_atom = X11.Atom.intern x11 "TARGETS" in
+    let requestor = Promise.await t.clipboard_window in
+    let targets =
+      match
+        fetch_selection t clipboard
+          ~requestor
+          ~target:targets_atom
+          ~property:targets_atom
+      with
       | Some x -> parse_targets x11 x
-      | None -> Lwt.return []
+      | None -> []
     in
     (* Create a Wayland source offering those targets *)
     let source = Clipboard_mgr.create_data_source t.clipboard_mgr @@ object
@@ -416,7 +411,7 @@ module Selection = struct
 
         method on_cancelled self =
           Log.info (fun f -> f "X selection source cancelled by Wayland - X app no longer owns clipboard");
-          Lwt.async (fun () ->
+          Fiber.fork ~sw:t.sw (fun () ->
               X11.Selection.set_owner x11 ~owner:(Some requestor) ~timestamp:`CurrentTime clipboard
             );
           Clipboard_source.destroy self
@@ -429,15 +424,14 @@ module Selection = struct
       end
     in
     targets |> List.iter (fun mime_type -> Clipboard_source.offer source ~mime_type);
-    Clipboard_device.set_selection t.clipboard_device ~source:(Some source) ~serial:(Relay.last_serial t.relay);
-    Lwt.return_unit
+    Clipboard_device.set_selection t.clipboard_device ~source:(Some source) ~serial:(Relay.last_serial t.relay)
 
   (* Handle a SelectionClear event from Xwayland. *)
   let selection_clear t ~time:_ ~owner:_ ~selection =
-    Lwt.async (fun () ->
-        let* x11 = t.x11 in
-        let* primary = X11.Atom.intern x11 "PRIMARY"
-        and* clipboard = X11.Atom.intern x11 "CLIPBOARD" in
+    Fiber.fork ~sw:t.sw (fun () ->
+        let x11 = Promise.await_exn t.x11 in
+        let primary = X11.Atom.intern x11 "PRIMARY" in
+        let clipboard = X11.Atom.intern x11 "CLIPBOARD" in
         if selection = primary then (
           Log.info (fun f -> f "An Xwayland app now owns the PRIMARY selection");
           set_x_owned_primary t
@@ -445,11 +439,9 @@ module Selection = struct
           Log.info (fun f -> f "An Xwayland app now owns the CLIPBOARD selection");
           set_x_owned_clipboard t
         ) else (
-          Log.warn (fun f -> f "SelectionClear for unknown selection type %a" (X11.Atom.pp x11) selection);
-          Lwt.return_unit
+          Log.warn (fun f -> f "SelectionClear for unknown selection type %a" (X11.Atom.pp x11) selection)
         )
-      );
-    Lwt.return_unit
+      )
 
   (* Create a dummy X window for receiving selection transfers. *)
   let create_transfer_window x11 ~parent =
@@ -460,25 +452,25 @@ module Selection = struct
      so any existing selection must be owned by a Wayland client). This is called once the X connection
      is initialised. *)
   let init_x11 t =
-    let* x11 = t.x11 in
+    let x11 = Promise.await_exn t.x11 in
     match X11.Window.roots x11 with
     | [root] ->
-      let* selection_window = create_transfer_window x11 ~parent:root
-      and* clipboard_window = create_transfer_window x11 ~parent:root
-      and* primary = X11.Atom.intern x11 "PRIMARY"
-      and* clipboard = X11.Atom.intern x11 "CLIPBOARD" in
-      let* () = X11.Selection.set_owner x11 ~owner:(Some selection_window) ~timestamp:`CurrentTime primary
-      and* () = X11.Selection.set_owner x11 ~owner:(Some clipboard_window) ~timestamp:`CurrentTime clipboard in
-      Lwt.wakeup t.set_selection_window selection_window;
-      Lwt.wakeup t.set_clipboard_window clipboard_window;
-      Lwt.return_unit
+      (* todo: could parallise *)
+      let selection_window = create_transfer_window x11 ~parent:root in
+      let clipboard_window = create_transfer_window x11 ~parent:root in
+      let primary = X11.Atom.intern x11 "PRIMARY" in
+      let clipboard = X11.Atom.intern x11 "CLIPBOARD" in
+      X11.Selection.set_owner x11 ~owner:(Some selection_window) ~timestamp:`CurrentTime primary;
+      X11.Selection.set_owner x11 ~owner:(Some clipboard_window) ~timestamp:`CurrentTime clipboard;
+      Promise.resolve t.set_selection_window selection_window;
+      Promise.resolve t.set_clipboard_window clipboard_window;
     | _ ->
       failwith "Expected exactly one X11 root window!"
 
-  let create ~relay ~seat ~x11 ~registry =
+  let create ~sw ~relay ~seat ~x11 ~registry =
     let clipboard_mgr = Wayland.Registry.bind registry @@ new Clipboard_mgr.v1 in
-    let selection_window, set_selection_window = Lwt.wait () in
-    let clipboard_window, set_clipboard_window = Lwt.wait () in
+    let selection_window, set_selection_window = Promise.create () in
+    let clipboard_window, set_clipboard_window = Promise.create () in
     let wayland_primary_offer = ref None in
     let wayland_clipboard_offer = ref None in
     let primary_selection =
@@ -492,6 +484,7 @@ module Selection = struct
     in
     let clipboard_device = Clipboard_mgr.get_data_device clipboard_mgr ~seat @@ clipboard_device ~wayland_clipboard_offer in
     {
+      sw;
       x11;
       relay;
       awaiting_notify = Hashtbl.create 1;
@@ -519,27 +512,28 @@ type window_info = {
 }
 
 (* Collect information about a new window we've been asked to manage. *)
-let examine_window t window : window_info Lwt.t =
-  let* x11 = t.x11 in
-  let* title =
-    let* wm_name = intern t "WM_NAME" in
-    X11.Property.get_string x11 window wm_name >|= Option.value ~default:"<untitled>"
-  and* window_type =
-    let* net_wm_window_type = intern t "_NET_WM_WINDOW_TYPE" in
+let examine_window t window : window_info =
+  let x11 = Promise.await_exn t.x11 in
+  (* todo: parallel *)
+  let title =
+    let wm_name = intern t "WM_NAME" in
+    X11.Property.get_string x11 window wm_name |> Option.value ~default:"<untitled>"
+  and window_type =
+    let net_wm_window_type = intern t "_NET_WM_WINDOW_TYPE" in
     X11.Property.get_atoms x11 window net_wm_window_type
-  and* wm_normal_hints = X11.Icccm.get_wm_normal_hints x11 window
-  and* win_attrs = X11.Window.get_attributes x11 window
-  and* type_normal = intern t "_NET_WM_WINDOW_TYPE_NORMAL"
-  and* type_dialog = intern t "_NET_WM_WINDOW_TYPE_DIALOG"
-  and* type_dnd = intern t "_NET_WM_WINDOW_TYPE_DND"
-  and* type_dropdown_menu = intern t "_NET_WM_WINDOW_TYPE_DROPDOWN_MENU"
-  and* type_popup_menu = intern t "_NET_WM_WINDOW_TYPE_POPUP_MENU"
-  and* transient_for =
-    let* transient_for = intern t "WM_TRANSIENT_FOR" in
-    X11.Property.get x11 window transient_for ~long_offset:0l ~long_length:1l >|= Option.map (fun info ->
+  and wm_normal_hints = X11.Icccm.get_wm_normal_hints x11 window
+  and win_attrs = X11.Window.get_attributes x11 window
+  and type_normal = intern t "_NET_WM_WINDOW_TYPE_NORMAL"
+  and type_dialog = intern t "_NET_WM_WINDOW_TYPE_DIALOG"
+  and type_dnd = intern t "_NET_WM_WINDOW_TYPE_DND"
+  and type_dropdown_menu = intern t "_NET_WM_WINDOW_TYPE_DROPDOWN_MENU"
+  and type_popup_menu = intern t "_NET_WM_WINDOW_TYPE_POPUP_MENU"
+  and transient_for =
+    let transient_for = intern t "WM_TRANSIENT_FOR" in
+    X11.Property.get x11 window transient_for ~long_offset:0l ~long_length:1l |> Option.map (fun info ->
         Cstruct.LE.get_uint32 info.X11.Property.value 0 |> X11.Xid.of_int
       )
-  and* geometry = X11.Window.get_geometry x11 window
+  and geometry = X11.Window.get_geometry x11 window
   in
   let window_type =
     let rec aux = function
@@ -554,7 +548,7 @@ let examine_window t window : window_info Lwt.t =
     in
     if window_type = [] && not win_attrs.override_redirect then `Normal else aux window_type
   in
-  Lwt.return {
+  {
     title;
     window_type;
     wm_normal_hints;
@@ -572,7 +566,7 @@ let init_toplevel t ~x11 ~xdg_surface ~info ~paired window =
         let width = Int32.to_int width in
         let height = Int32.to_int height in
         if width > 0 && height > 0 then (
-          Lwt.async (fun () ->
+          Fiber.fork ~sw:t.sw (fun () ->
               let (width, height) = scale_to_client t (width, height) in
               (paired:paired).geometry <- { paired.geometry with width; height };
               X11.Window.configure x11 window ~width ~height ~border_width:0
@@ -583,11 +577,11 @@ let init_toplevel t ~x11 ~xdg_surface ~info ~paired window =
       method on_wm_capabilities _ ~capabilities:_ = ()
 
       method on_close _ =
-        Lwt.async (fun () ->
-            let* x11 = t.x11 in
-            let* wm_protocols = X11.Atom.intern x11 "WM_PROTOCOLS"
-            and* wm_delete_window = X11.Atom.intern x11 "WM_DELETE_WINDOW" in
-            let* protocols = X11.Property.get_atoms x11 window wm_protocols in
+        Fiber.fork ~sw:t.sw (fun () ->
+            let x11 = Promise.await_exn t.x11 in
+            let wm_protocols = X11.Atom.intern x11 "WM_PROTOCOLS"
+            and wm_delete_window = X11.Atom.intern x11 "WM_DELETE_WINDOW" in
+            let protocols = X11.Property.get_atoms x11 window wm_protocols in
             if List.mem wm_delete_window protocols then (
               let data = Cstruct.create 8 in
               Cstruct.LE.set_uint32 data 0 (wm_delete_window :> int32);
@@ -640,7 +634,7 @@ let init_popup t ~x11 ~xdg_surface ~info ~parent ~paired window =
            This may violate the Wayland spec if unscaling is being used, but Sway allows it and it looks much better. *)
         if width > 0 && height > 0 && not info.win_attrs.override_redirect then (
           let (width, height) = scale_to_client t (width, height) in
-          Lwt.async (fun () ->
+          Fiber.fork ~sw:t.sw (fun () ->
               (paired:paired).geometry <- { paired.geometry with width; height };
               X11.Window.configure x11 window ~width ~height ~border_width:0
             )
@@ -661,13 +655,11 @@ let last_event_surface t =
    Create the window frame and add to [paired] and [of_host_surface].
    Note that [host_surface] may have already been destroyed by the time we get here. *)
 let pair t ~set_configured ~host_surface window =
-  let* x11 = t.x11 in
-  let* () =
-    (* Get notified of title changes *)
-    X11.Window.create_attributes ~event_mask:[X11.Window.PropertyChange] ()
-    |> X11.Window.change_attributes x11 window
-  in
-  let+ info = examine_window t window in
+  let x11 = Promise.await_exn t.x11 in
+  (* Get notified of title changes *)
+  X11.Window.create_attributes ~event_mask:[X11.Window.PropertyChange] ()
+  |> X11.Window.change_attributes x11 window;
+  let info = examine_window t window in
   if Proxy.can_send host_surface then (
     let parent = Option.bind info.transient_for (Hashtbl.find_opt t.paired) in
     let xdg_surface = Xdg_wm_base.get_xdg_surface t.wm_base ~surface:host_surface @@ object
@@ -719,13 +711,12 @@ let rec pair_when_ready ~x11 t window wayland_id =
   match Hashtbl.find_opt t.unpaired wayland_id with
   | None ->
     Log.info (fun f -> f "Unknown Wayland object %ld; waiting for surface to be created..." wayland_id);
-    let* () = Lwt_condition.wait t.unpaired_added in
+    Eio.Condition.await_no_mutex t.unpaired_added;
     pair_when_ready ~x11 t window wayland_id
   | Some { client_surface = _; host_surface; set_configured } ->
     Log.info (fun f -> f "Setting up Wayland surface %ld using X11 window %a" wayland_id X11.Xid.pp window);
     Hashtbl.remove t.unpaired wayland_id;
-    Lwt.async (fun () -> pair t ~set_configured ~host_surface window);
-    Lwt.return_unit
+    Fiber.fork ~sw:t.sw (fun () -> pair t ~set_configured ~host_surface window)
 
 let unpair t paired =
   begin match paired.xdg_role with
@@ -766,14 +757,13 @@ module Input = struct
      events from the compositor are paused while it's running. *)
   let ensure_topmost ~x11 t paired =
     match t.top_window with
-    | Some x when x.window = paired.window -> Lwt.return_unit            (* Already on top *)
+    | Some x when x.window = paired.window -> ()            (* Already on top *)
     | _ ->
       (* Ensure any previous pointer events (for the old surface) have been delivered: *)
-      let* () = t.xwayland.wayland_ping () in
+      t.xwayland.wayland_ping ();
       t.top_window <- None;
-      (* let* () = Lwt_unix.sleep 2.0 in *)
-      let+ e = X11.Window.configure_checked x11 paired.window ~stack_mode:`Above in
-      match e with
+      (* let* () = Eio_unix.sleep 2.0 in *)
+      match X11.Window.configure_checked x11 paired.window ~stack_mode:`Above with
       | Ok () ->
         t.top_window <- Some paired
       | Error err ->
@@ -785,15 +775,16 @@ module Input = struct
      events from the compositor are paused while it's running. *)
   let ensure_focus ~x11 t paired =
     match t.focus_window with
-    | Some x when x.window = paired.window -> Lwt.return_unit            (* Already has focus *)
+    | Some x when x.window = paired.window -> ()            (* Already has focus *)
     | _ ->
       (* Ensure any previous keyboard events (for the old surface) have been delivered: *)
-      let* () = t.xwayland.wayland_ping () in
+      t.xwayland.wayland_ping ();
       t.focus_window <- None;
-      (* let* () = Lwt_unix.sleep 2.0 in *)
-      let+ e = X11.Window.set_input_focus_checked x11 (`Window paired.window)
-          ~revert_to:`PointerRoot ~time:`CurrentTime in
-      match e with
+      (* let* () = Eio_unix.sleep 2.0 in *)
+      match
+        X11.Window.set_input_focus_checked x11 (`Window paired.window)
+          ~revert_to:`PointerRoot ~time:`CurrentTime
+      with
       | Ok () ->
         t.focus_window <- Some paired
       | Error err ->
@@ -824,17 +815,12 @@ module Input = struct
       forward_event ()
     | Some paired ->
       Log.info (fun f -> f "Pausing to raise X11 window");
-      Relay.set_from_host_paused t.xwayland.relay true;
-      Lwt.async (fun () ->
-          let* x11 = t.xwayland.x11 in
-          (* Raise the target X11 window so that it will get the following events: *)
-          let* () = ensure_topmost ~x11 t paired in
-          (* Now resume event delivery, starting with the delayed pointer enter event: *)
-          forward_event ();
-          Log.info (fun f -> f "Window raised; unpausing");
-          Relay.set_from_host_paused t.xwayland.relay false;
-          Lwt.return_unit
-        )
+      let x11 = Promise.await_exn t.xwayland.x11 in
+      (* Raise the target X11 window so that it will get the following events: *)
+      ensure_topmost ~x11 t paired;
+      (* Now resume event delivery, starting with the delayed pointer enter event: *)
+      forward_event ();
+      Log.info (fun f -> f "Window raised; unpausing")
 
   let on_keyboard_entry t ~surface ~forward_event =
     let paired = paired_of_surface surface in
@@ -846,17 +832,12 @@ module Input = struct
       forward_event ()
     | Some paired ->
       Log.info (fun f -> f "Pausing to focus X11 window");
-      Relay.set_from_host_paused t.xwayland.relay true;
-      Lwt.async (fun () ->
-          let* x11 = t.xwayland.x11 in
-          (* Focus the target X11 window so that it will get the following events: *)
-          let* () = ensure_focus ~x11 t paired in
-          (* Now resume event delivery, starting with the delayed keyboard enter event: *)
-          forward_event ();
-          Log.info (fun f -> f "Window has focus; unpausing");
-          Relay.set_from_host_paused t.xwayland.relay false;
-          Lwt.return_unit
-        )
+      let x11 = Promise.await_exn t.xwayland.x11 in
+      (* Focus the target X11 window so that it will get the following events: *)
+      ensure_focus ~x11 t paired;
+      (* Now resume event delivery, starting with the delayed keyboard enter event: *)
+      forward_event ();
+      Log.info (fun f -> f "Window has focus; unpausing")
 
   let on_keyboard_leave t ~surface =
     match paired_of_surface surface with
@@ -864,15 +845,13 @@ module Input = struct
     | Some paired ->
       match t.focus_window with
       | Some x when x.window = paired.window ->
-        Lwt.async (fun () ->
-          let* x11 = t.xwayland.x11 in
+        Fiber.fork ~sw:t.xwayland.sw (fun () ->
+          let x11 = Promise.await_exn t.xwayland.x11 in
           t.focus_window <- None;
-          X11.Window.set_input_focus_checked x11 `None ~revert_to:`None ~time:`CurrentTime >>= function
-          | Ok () ->
-            Lwt.return_unit
+          match X11.Window.set_input_focus_checked x11 `None ~revert_to:`None ~time:`CurrentTime with
+          | Ok () -> ()
           | Error err ->
-            Log.info (fun f -> f "Error removing focus from window: %a" X11.Error.pp_code err);
-            Lwt.return_unit
+            Log.info (fun f -> f "Error removing focus from window: %a" X11.Error.pp_code err)
           )
       | _ -> ()
 end
@@ -882,19 +861,19 @@ end
    @param xrdb use this as the initial xrdb configuration.
    @param selection use this to initialise selection proxying *)
 let initialise_x ~xrdb ~selection t =
-  let* x11 = t.x11 in
-  let* composite = X11.Composite.init x11 in
+  let x11 = Promise.await_exn t.x11 in
+  let composite = X11.Composite.init x11 in
   (* Take ownership of the selections *)
-  let* () = Selection.init_x11 selection in
-  X11.Window.roots x11 |> Lwt_list.iteri_p (fun i root ->
+  Selection.init_x11 selection;
+  X11.Window.roots x11 |> List.iteri (fun i root ->
       (* Enable the Composite extension.
          By default, X just asks clients to draw to the root window as needed, but we're not using a root window.
          Composite instead allocates a buffer to store each window's data, which can then be shared with the
          Wayland compositor. *)
-      let* () = X11.Composite.redirect_subwindows composite ~window:root ~update:`Manual in
+      X11.Composite.redirect_subwindows composite ~window:root ~update:`Manual;
       (* Load the default cursor image *)
-      let* cursor_font = X11.Font.open_font x11 "cursor" in
-      let* default_cursor = X11.Font.create_glyph_cursor x11
+      let cursor_font = X11.Font.open_font x11 "cursor" in
+      let default_cursor = X11.Font.create_glyph_cursor x11
           ~source_font:cursor_font ~mask_font:cursor_font
           ~source_char:68 ~mask_char:69
           ~bg:(0xffff, 0xffff, 0xffff)
@@ -904,35 +883,32 @@ let initialise_x ~xrdb ~selection t =
          This means we get notified when new windows are mapped, and we receive a message telling
          us the corresponding Wayland surface for each X window. *)
       let event_mask = X11.Window.[SubstructureNotify; SubstructureRedirect] in
-      let* () =
-        X11.Window.create_attributes ~event_mask ~cursor:default_cursor ()
-        |> X11.Window.change_attributes x11 root
-      in
+      X11.Window.create_attributes ~event_mask ~cursor:default_cursor ()
+      |> X11.Window.change_attributes x11 root;
       (* Initialise xrdb *)
-      let* atom_string = intern t "STRING"
-      and* atom_resource_manager = intern t "RESOURCE_MANAGER" in
-      let* () = X11.Property.set_string x11 root atom_resource_manager xrdb ~ty:atom_string in
+      let atom_string = intern t "STRING"
+      and atom_resource_manager = intern t "RESOURCE_MANAGER" in
+      X11.Property.set_string x11 root atom_resource_manager xrdb ~ty:atom_string;
       (* Become the window manager. This allows other clients to connect. *)
-      let* wm_sn = intern t ~only_if_exists:false ("WM_S" ^ string_of_int i) in
+      let wm_sn = intern t ~only_if_exists:false ("WM_S" ^ string_of_int i) in
       X11.Selection.set_owner x11 ~owner:(Some root) ~timestamp:`CurrentTime wm_sn
     )
 
 (* We've just spawned the Xwayland process. Run the X event loop. *)
 let listen_x11 ~selection t =
-  let* x11 = t.x11 in
-  let wl_surface_id = intern t "WL_SURFACE_ID" ~only_if_exists:false in
+  let x11 = Promise.await_exn t.x11 in
+  let wl_surface_id = Fiber.fork_promise ~sw:t.sw (fun () -> intern t "WL_SURFACE_ID" ~only_if_exists:false) in
   (* The event handler is used to handle event message received from Xwayland. *)
   let event_handler = object (_ : X11.Event.handler)
     method client_message ~window ~ty body =
-      let* wl_surface_id = wl_surface_id in
+      let wl_surface_id = Promise.await_exn wl_surface_id in
       if ty = wl_surface_id then (
         let wayland_id = Cstruct.LE.get_uint32 body 0 in
         Log.info (fun f -> f "X window %a corresponds to Wayland surface %ld" X11.Window.pp window wayland_id);
         (* Note: this blocks the X11 event loop until the corresponding Wayland event arrives: *)
         pair_when_ready ~x11 t window wayland_id
       ) else (
-        Log.info (fun f -> f "ClientMessage on window %a (type=%a): %a" X11.Window.pp window (X11.Atom.pp x11) ty Cstruct.hexdump_pp body);
-        Lwt.return_unit
+        Log.info (fun f -> f "ClientMessage on window %a (type=%a): %a" X11.Window.pp window (X11.Atom.pp x11) ty Cstruct.hexdump_pp body)
       )
 
     method selection_request = Selection.selection_request selection
@@ -941,7 +917,7 @@ let listen_x11 ~selection t =
 
     method map_request ~window =
       (* Put new windows at the bottom of the stack so they don't interfere with the active window *)
-      let* () = X11.Window.configure x11 window ~stack_mode:`Below in
+      X11.Window.configure x11 window ~stack_mode:`Below;
       X11.Window.map x11 window
 
     method configure_request ~window ~width ~height =
@@ -964,22 +940,17 @@ let listen_x11 ~selection t =
     method property_notify ~window ~atom ~time:_ ~state =
       Log.info (fun f -> f "PropertyNotify: %a/%a %s" X11.Window.pp window (X11.Atom.pp x11) atom
                    (match state with `NewValue -> "has new value" | `Deleted -> "deleted"));
-      Lwt.async (fun () ->
-          let* wm_name = intern t "WM_NAME" in
+      Fiber.fork ~sw:t.sw (fun () ->
+          let wm_name = intern t "WM_NAME" in
           if atom = wm_name then (
             match Hashtbl.find_opt t.paired window with
             | Some { xdg_role = `Toplevel toplevel; _ } ->
-              let* title = X11.Property.get_string x11 window wm_name >|= Option.value ~default:"<untitled>" in
+              let title = X11.Property.get_string x11 window wm_name |> Option.value ~default:"<untitled>" in
               if Proxy.can_send toplevel then
-                Xdg_toplevel.set_title toplevel ~title:(t.config.tag ^ title);
-              Lwt.return_unit
-            | _ ->
-              Lwt.return_unit
-          ) else (
-            Lwt.return_unit
+                Xdg_toplevel.set_title toplevel ~title:(t.config.tag ^ title)
+            | _ -> ()
           )
-        );
-      Lwt.return_unit
+        )
   end in
   X11.Event.listen x11 event_handler
 
@@ -989,61 +960,33 @@ let no_wayland_ping_warning = lazy (
 
 let no_wayland_ping () =
   Lazy.force no_wayland_ping_warning;
-  Lwt_unix.sleep 0.01
+  Eio_unix.sleep 0.01
 
-let string_of_fd (fd : Lwt_unix.file_descr) =
-  let fd : int = Obj.magic (Lwt_unix.unix_file_descr fd : Unix.file_descr) in
-  string_of_int fd
+let int_fd_of_resource r =
+  Eio_unix.Fd.use_exn "string_of_fd" (Eio_unix.Resource.fd r) @@ fun fd ->
+  let fd : int = Obj.magic (fd : Unix.file_descr) in
+  fd
+
+let string_of_fd x = string_of_int (int_fd_of_resource x)
 
 let quiet_logging () =
   let quiet = ref true in
   Log.debug (fun _ -> quiet := false);
   !quiet
 
-(* Exec Xwayland (note: this function runs in a forked child process).
-   @param display X11 display number
-   @param remote_wayland Xwayland's end of the Wayland protocol socket
-   @param remote_wm_socket Xwayland's end of the X11 protocol socket
-   @param listen_socket the X11 socket where clients connect *)
-let exec_xwayland config ~display ~remote_wayland ~remote_wm_socket ~listen_socket =
+let monitor name thread () =
   try
-    Lwt_main.Exit_hooks.remove_all ();
-    let cmd = [|
-      (* "rr"; "record"; *)
-      config.Config.xwayland_binary;
-      "-nolisten"; "tcp";
-      "-rootless";
-      "-shm";
-      "-listen"; string_of_fd listen_socket;
-      (* "-verbose"; "9"; *)
-      "-wm"; string_of_fd remote_wm_socket;
-      Printf.sprintf ":%d" display
-    |] in
-    Unix.putenv "WAYLAND_SOCKET" (string_of_fd remote_wayland);
-    Lwt_unix.clear_close_on_exec remote_wayland;
-    Lwt_unix.clear_close_on_exec listen_socket;
-    Lwt_unix.clear_close_on_exec remote_wm_socket;
-    (* Hide the huge number of "Could not resolve keysym" warnings from xkbcomp *)
-    if quiet_logging () then (
-      let null = Unix.openfile Filename.null Unix.[O_RDWR] 0 in
-      Unix.dup2 null Unix.stderr;
-      Unix.close null;
-    );
-    Unix.execvp cmd.(0) cmd
+    thread ();
+    Log.info (fun f -> f "%s finished" name)
   with ex ->
-    Format.eprintf "Fork error: %a@." Fmt.exn ex;
-    exit 1
-
-let monitor name thread =
-  Lwt.try_bind thread
-    (fun () -> Log.info (fun f -> f "%s finished" name); Lwt.return_unit)
-    (fun ex -> Log.warn (fun f -> f "%s failed: %a" name Fmt.exn ex); Lwt.return_unit)
+    Log.warn (fun f -> f "%s failed: %a" name Fmt.exn ex)
 
 (* We've just spawned an Xwayland process.
    Talk to it using the Wayland and X11 protocols. *)
-let handle_xwayland ~config ~virtio_gpu ~local_wayland ~local_wm_socket =
-  let x11 = X11.Display.connect local_wm_socket in
-  let* relay = Relay.create ?virtio_gpu config in
+let handle_xwayland ~net ~config ~virtio_gpu ~local_wayland ~local_wm_socket =
+  Switch.run @@ fun sw ->
+  let x11 = Fiber.fork_promise ~sw (fun () -> X11.Display.connect ~sw local_wm_socket) in
+  let relay = Relay.create ?virtio_gpu ~sw ~net config in
   let registry = Relay.registry relay in
   let wm_base = Wayland.Registry.bind registry @@ object
       inherit [_] Xdg_wm_base.v1
@@ -1062,15 +1005,16 @@ let handle_xwayland ~config ~virtio_gpu ~local_wayland ~local_wm_socket =
       Log.warn (fun f -> f "Can't get decoration manager: %a" Fmt.exn ex);
       None
   in
-  let selection = Selection.create ~seat ~x11 ~registry ~relay in
+  let selection = Selection.create ~sw ~seat ~x11 ~registry ~relay in
   let t = {
+    sw;
     relay;
     x11;
     config;
     wm_base;
     decor_mgr;
     unpaired = Hashtbl.create 5;
-    unpaired_added = Lwt_condition.create ();
+    unpaired_added = Eio.Condition.create ();
     paired = Hashtbl.create 5;
     pointer_surface = None;
     keyboard_surface = None;
@@ -1091,17 +1035,16 @@ let handle_xwayland ~config ~virtio_gpu ~local_wayland ~local_wm_socket =
       let host_surface = (host_surface :> host_surface) in
       let client_surface_id = Proxy.id client_surface in
       Hashtbl.add t.unpaired client_surface_id { client_surface; host_surface; set_configured };
-      Lwt_condition.broadcast t.unpaired_added ();
-      Lwt.async (fun () ->
-          let* x11 = t.x11 in
-          let* () = X11.Display.sync x11 in
+      Eio.Condition.broadcast t.unpaired_added;
+      Fiber.fork ~sw:t.sw (fun () ->
+          let x11 = Promise.await_exn t.x11 in
+          X11.Display.sync x11;
           (* If we haven't received a pairing message by now, then this isn't for us. *)
           if Hashtbl.mem t.unpaired client_surface_id then (
             Log.info (fun f -> f "%a doesn't correspond to an X11 window" Proxy.pp client_surface);
             Hashtbl.remove t.unpaired client_surface_id;
             set_configured `Unmanaged
-          );
-          Lwt.return_unit
+          )
         )
 
     method on_destroy_surface host_surface =
@@ -1117,66 +1060,81 @@ let handle_xwayland ~config ~virtio_gpu ~local_wayland ~local_wm_socket =
     method scale = Int32.of_int t.config.xunscale
   end in
   let xrdb = String.concat "\n" config.xrdb in
-  Lwt.join [
+  Fiber.all [
     monitor "Xwayland Wayland thread" (fun () -> Relay.accept relay ~xwayland local_wayland);
     monitor "Xwayland X11 thread"     (fun () -> listen_x11 ~selection t);
     monitor "Xwayland WM init thread" (fun () -> initialise_x ~xrdb ~selection t);
   ]
 
-let with_socket_pair fn =
-  let local, remote = Lwt_unix.(socketpair PF_UNIX SOCK_STREAM 0) in
-  Lwt_unix.set_close_on_exec local;
-  Lwt_unix.set_close_on_exec remote;
-  Lwt.finalize
-    (fun () -> fn ~local ~remote)
-    (fun () ->
-       let* () = Lwt_unix.close local in
-       match Lwt_unix.state remote with
-       | Opened -> Lwt_unix.close remote
-       | Closed | Aborted _ -> Lwt.return_unit
-    )
-
-let spawn_and_run_xwayland ~config ~virtio_gpu ~display listen_socket =
+let spawn_and_run_xwayland ~proc_mgr ~net ~config ~virtio_gpu ~display listen_socket =
+  Switch.run @@ fun sw ->
   (* Set up connections between us and Xwayland: *)
-  with_socket_pair @@ fun ~local:local_wm_socket ~remote:remote_wm_socket ->
-  with_socket_pair @@ fun ~local:local_wayland ~remote:remote_wayland ->
+  let local_wm_socket, remote_wm_socket = Eio_unix.Net.socketpair_stream ~sw () in
+  let local_wayland, remote_wayland = Eio_unix.Net.socketpair_stream ~sw () in
   (* Spawn Xwayland child process: *)
-  match Lwt_unix.fork () with
-  | 0 ->
-    (* We are the child *)
-    exec_xwayland config ~display ~remote_wayland ~listen_socket ~remote_wm_socket
-  | xwayland_pid ->
-    (* We are the parent *)
-    Lwt.finalize
-      (fun () ->
-         let* () = Lwt_unix.close remote_wm_socket in
-         let* () = Lwt_unix.close remote_wayland in
-         Lwt.catch
-           (fun () ->
-             handle_xwayland ~config ~virtio_gpu ~local_wayland ~local_wm_socket
-           )
-           (fun ex ->
-              Log.warn (fun f -> f "X11 WM failed: %a" Fmt.exn ex);
-              Lwt.return_unit
-           )
-      )
-      (fun () ->
-         let* (_, status) = Lwt_unix.waitpid [] xwayland_pid in
-         Log.info (fun f -> f "Xwayland process ended (%a)" Trace.pp_status status);
-         Lwt.return_unit
-      )
+  let cmd = [
+    (* "rr"; "record"; *)
+    config.Config.xwayland_binary;
+    "-nolisten"; "tcp";
+    "-rootless";
+    "-shm";
+    "-listen"; string_of_fd listen_socket;
+    (* "-verbose"; "9"; *)
+    "-wm"; string_of_fd remote_wm_socket;
+    Printf.sprintf ":%d" display
+  ] in
+  let inherit_fd r = (int_fd_of_resource r, Eio_unix.Resource.fd r, `Blocking) in
+  let env =
+    Unix.environment ()
+    |> Array.to_list
+    |> Unix_env.replace "WAYLAND_SOCKET" (string_of_fd remote_wayland)
+  in
+  let child =
+    let fds = [
+      (* 2, null, `Blocking; *)
+      inherit_fd listen_socket;
+      inherit_fd remote_wayland;
+      inherit_fd remote_wm_socket;
+    ] in
+    let fds =
+      (* Hide the huge number of "Could not resolve keysym" warnings from xkbcomp *)
+      if quiet_logging () then (
+        let null =
+          Unix.openfile Filename.null Unix.[O_RDWR] 0
+          |> Eio_unix.Fd.of_unix ~sw ~close_unix:true
+        in
+        (2, null, `Blocking) :: fds
+      ) else fds
+    in
+    Eio_unix.Process.spawn_unix ~sw proc_mgr cmd
+      ~env:(Array.of_list env)
+      ~fds
+  in
+  Eio.Flow.close remote_wm_socket;
+  Eio.Flow.close remote_wayland;
+  begin
+    try
+      handle_xwayland ~net ~config ~virtio_gpu ~local_wayland ~local_wm_socket
+    with ex ->
+      Log.warn (fun f -> f "X11 WM failed: %a" Fmt.exn ex)
+  end;
+  let status = Eio.Process.await child in
+  Log.info (fun f -> f "Xwayland process ended (%a)" Eio.Process.pp_status status)
 
-let listen ~config ~virtio_gpu ~display listen_socket =
+let await_readable r =
+  Eio_unix.Fd.use_exn "await_readable" (Eio_unix.Resource.fd r) Eio_unix.await_readable
+
+let listen ~proc_mgr ~net ~config ~virtio_gpu ~display listen_socket =
   let rec aux () =
     Log.info (fun f -> f "Waiting for X11 clients");
-    let* () = Lwt_unix.wait_read listen_socket in
+    await_readable listen_socket;
     Log.info (fun f -> f "X client detected - launching %S..." config.Config.xwayland_binary);
     let t0 = Unix.gettimeofday () in
-    let* () = spawn_and_run_xwayland ~config ~virtio_gpu ~display listen_socket in
+    spawn_and_run_xwayland ~proc_mgr ~net ~config ~virtio_gpu ~display listen_socket;
     let delay = min_respawn_time -. (Unix.gettimeofday () -. t0) in
     if delay > 0.0 then (
       Log.info (fun f -> f "Xwayland died too quickly... waiting a bit before retrying...");
-      let* () = Lwt_unix.sleep delay in
+      Eio_unix.sleep delay;
       aux ()
     ) else (
       aux ()

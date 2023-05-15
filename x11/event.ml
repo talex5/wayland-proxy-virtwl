@@ -1,6 +1,8 @@
+open Eio.Std
+
+module Read = Eio.Buf_read
+
 open Types
-open Lwt.Syntax
-open Lwt.Infix
 
 [%%cenum
   type code =
@@ -68,47 +70,44 @@ let () =
     )
 
 let read x =
-  Lwt.catch
-    (fun () ->
-       let* msg = Wire.read_exactly 32 x in
-       match get_event_code msg with
-       | 0 -> Lwt.return (`Error msg)
-       | 1 ->
-         let extra_len = Int32.to_int (get_reply_length msg) in
-         let* extra =
-           if extra_len > 0 then Wire.read_exactly (extra_len * 4) x
-           else Lwt.return Cstruct.empty
-         in
-         Lwt.return (`Reply (Cstruct.append msg extra))
-       | event ->
-         Lwt.return @@
-         match int_to_code (event land 0x7f) with
-         | Some ev -> `Event (ev, msg)
-         | None -> `Unknown_event event
-    )
-    (fun ex -> Lwt.fail (X11_read_error ex))
+  try
+    let msg = Wire.read_exactly 32 x in
+    match get_event_code msg with
+    | 0 -> `Error msg
+    | 1 ->
+      let extra_len = Int32.to_int (get_reply_length msg) in
+      let extra =
+        if extra_len > 0 then Wire.read_exactly (extra_len * 4) x
+        else Cstruct.empty
+      in
+      `Reply (Cstruct.append msg extra)
+    | event ->
+      match int_to_code (event land 0x7f) with
+      | Some ev -> `Event (ev, msg)
+      | None -> `Unknown_event event
+  with ex -> raise (X11_read_error ex)
 
 type handler = <
-  map_request : window:window -> unit Lwt.t;
+  map_request : window:window -> unit;
 
   configure_request :
-    window:window -> width:int -> height:int -> unit Lwt.t;
+    window:window -> width:int -> height:int -> unit;
 
   client_message :
-    window:window -> ty:atom -> Cstruct.t -> unit Lwt.t;
+    window:window -> ty:atom -> Cstruct.t -> unit;
 
   selection_request :
     time:timestamp -> owner:window -> requestor:window ->
-    selection:atom -> target:atom -> property:atom option -> unit Lwt.t;
+    selection:atom -> target:atom -> property:atom option -> unit;
 
   selection_clear :
-    time:timestamp -> owner:window -> selection:atom -> unit Lwt.t;
+    time:timestamp -> owner:window -> selection:atom -> unit;
 
   selection_notify :
-    time:timestamp -> requestor:window -> selection:atom -> target:atom -> property:atom option -> unit Lwt.t;
+    time:timestamp -> requestor:window -> selection:atom -> target:atom -> property:atom option -> unit;
 
   property_notify :
-    window:window -> atom:atom -> time:timestamp -> state:[`NewValue | `Deleted] -> unit Lwt.t;
+    window:window -> atom:atom -> time:timestamp -> state:[`NewValue | `Deleted] -> unit;
 >
 
 module MapRequest = struct
@@ -172,13 +171,16 @@ end
 
 (* Read the next event from X. If [need_sync] is set (or becomes set while waiting), send a sync. *)
 let get_event t =
-  let x_event = read t.from_server in
+  let x_event = Fiber.fork_promise ~sw:t.sw (fun () -> read t.from_server) in
   let rec aux () =
-    let* () = if t.need_sync then Atom.Intern.send_sync t else Lwt.return_unit in
-    let wake = Lwt_condition.wait t.wake_input >|= fun () -> `Check_sync_flag in
-    Lwt.choose [ x_event; wake ] >>= function
+    if t.need_sync then Atom.Intern.send_sync t;
+    match
+      Fiber.first
+        (fun () -> Promise.await_exn x_event)
+        (fun () -> Eio.Condition.await_no_mutex t.wake_input; `Check_sync_flag)
+    with
     | `Check_sync_flag -> aux ()
-    | `Event _ | `Error _ | `Reply _ | `Unknown_event _ as x -> Lwt.return x
+    | `Event _ | `Error _ | `Reply _ | `Unknown_event _ as x -> x
   in
   aux ()
 
@@ -189,81 +191,75 @@ let rec wake t seq msg =
   | None ->
     Log.warn (fun f -> f "Reply to unknown sequence code %d" seq)
   | Some (expected, resolver) ->
-    if expected = seq then Lwt.wakeup resolver msg
+    if expected = seq then Promise.resolve resolver msg
     else (
       Log.debug (fun f -> f "No reply for message %d" expected);
-      Lwt.wakeup resolver `No_reply;
+      Promise.resolve resolver `No_reply;
       wake t seq msg
     )
 
 let listen t (handler:handler) =
-  let rec aux () =
-    let* () =
-      get_event t >>= function
-      | `Reply msg ->
-        let seq = get_reply_seq msg in
-        Log.debug (fun f -> f "@[<v2>Reply to %d@,%a@]" seq Cstruct.hexdump_pp msg);
-        wake t seq (`Reply msg);
-        Lwt.return_unit
-      | `Error msg ->
-        let seq = Error.get_error_seq msg in
-        Log.debug (fun f -> f "@[<v2>Error for %d@,%a@]" seq Cstruct.hexdump_pp msg);
-        wake t seq (`Error msg);
-        Lwt.return_unit
-      | `Event (MapRequest, body) ->
-        Log.info (fun f -> f "Got MapRequest");
-        let window = MapRequest.get_t_window body in
-        handler#map_request ~window
-      | `Event (ConfigureRequest, body) ->
-        Log.info (fun f -> f "Got ConfigureRequest");
-        let window = Window.ConfigureRequest.get_t_window body in
-        let width = Window.ConfigureRequest.get_t_width body in
-        let height = Window.ConfigureRequest.get_t_height body in
-        handler#configure_request ~window ~width ~height
-      | `Event (SelectionRequest, body) ->
-        let time = SelectionRequest.get_t_time body in
-        let owner = SelectionRequest.get_t_owner body in
-        let requestor = SelectionRequest.get_t_requestor body in
-        let selection = SelectionRequest.get_t_selection body in
-        let target = SelectionRequest.get_t_target body in
-        let property = SelectionRequest.get_t_property body in
-        Log.info (fun f -> f "Got SelectionRequest(%a) for target %a" (Atom.pp t) selection (Atom.pp t) target);
-        let property = if property = 0l then None else Some property in
-        handler#selection_request ~time ~owner ~requestor ~selection ~target ~property
-      | `Event (SelectionNotify, body) ->
-        let time = Selection.Notify.get_req_time body in
-        let requestor = Selection.Notify.get_req_requestor body in
-        let selection = Selection.Notify.get_req_selection body in
-        let target = Selection.Notify.get_req_target body in
-        let property = Selection.Notify.get_req_property body in
-        let property = if property = 0l then None else Some property in
-        Log.info (fun f -> f "Got SelectionNotify: %a/%a (%a)"
-                     Xid.pp requestor
-                     Fmt.(option ~none:(any "-") (Atom.pp t)) property
-                     (Atom.pp t) target);
-        handler#selection_notify ~time ~requestor ~selection ~target ~property
-      | `Event (PropertyNotify, body) ->
-        let window = PropertyNotify.get_t_window body in
-        let atom = PropertyNotify.get_t_atom body in
-        let time = PropertyNotify.get_t_time body in
-        let state = if PropertyNotify.get_t_state body = 0 then `NewValue else `Deleted in
-        handler#property_notify ~window ~atom ~time ~state
-      | `Event (SelectionClear, body) ->
-        let time = SelectionClear.get_t_time body in
-        let owner = SelectionClear.get_t_owner body in
-        let selection = SelectionClear.get_t_selection body in
-        handler#selection_clear ~time ~owner ~selection
-      | `Event (ClientMessage, body) ->
-        let window = Window.ClientMessage.get_t_window body in
-        let ty = Window.ClientMessage.get_t_ty body in
-        handler#client_message ~window ~ty (Cstruct.shift body Window.ClientMessage.sizeof_t)
-      | `Event (x, _body) ->
-        Log.info (fun f -> f "Got event %s" (code_to_string x));
-        Lwt.return_unit
-      | `Unknown_event x ->
-        Log.info (fun f -> f "Skipping unknown X11 message type %d" x);
-        Lwt.return_unit
-    in
-    aux ()
+  let handle_event () =
+    match get_event t with
+    | `Reply msg ->
+      let seq = get_reply_seq msg in
+      Log.debug (fun f -> f "@[<v2>Reply to %d@,%a@]" seq Cstruct.hexdump_pp msg);
+      wake t seq (`Reply msg)
+    | `Error msg ->
+      let seq = Error.get_error_seq msg in
+      Log.debug (fun f -> f "@[<v2>Error for %d@,%a@]" seq Cstruct.hexdump_pp msg);
+      wake t seq (`Error msg)
+    | `Event (MapRequest, body) ->
+      Log.info (fun f -> f "Got MapRequest");
+      let window = MapRequest.get_t_window body in
+      handler#map_request ~window
+    | `Event (ConfigureRequest, body) ->
+      Log.info (fun f -> f "Got ConfigureRequest");
+      let window = Window.ConfigureRequest.get_t_window body in
+      let width = Window.ConfigureRequest.get_t_width body in
+      let height = Window.ConfigureRequest.get_t_height body in
+      handler#configure_request ~window ~width ~height
+    | `Event (SelectionRequest, body) ->
+      let time = SelectionRequest.get_t_time body in
+      let owner = SelectionRequest.get_t_owner body in
+      let requestor = SelectionRequest.get_t_requestor body in
+      let selection = SelectionRequest.get_t_selection body in
+      let target = SelectionRequest.get_t_target body in
+      let property = SelectionRequest.get_t_property body in
+      Log.info (fun f -> f "Got SelectionRequest(%a) for target %a" (Atom.pp t) selection (Atom.pp t) target);
+      let property = if property = 0l then None else Some property in
+      handler#selection_request ~time ~owner ~requestor ~selection ~target ~property
+    | `Event (SelectionNotify, body) ->
+      let time = Selection.Notify.get_req_time body in
+      let requestor = Selection.Notify.get_req_requestor body in
+      let selection = Selection.Notify.get_req_selection body in
+      let target = Selection.Notify.get_req_target body in
+      let property = Selection.Notify.get_req_property body in
+      let property = if property = 0l then None else Some property in
+      Log.info (fun f -> f "Got SelectionNotify: %a/%a (%a)"
+                   Xid.pp requestor
+                   Fmt.(option ~none:(any "-") (Atom.pp t)) property
+                   (Atom.pp t) target);
+      handler#selection_notify ~time ~requestor ~selection ~target ~property
+    | `Event (PropertyNotify, body) ->
+      let window = PropertyNotify.get_t_window body in
+      let atom = PropertyNotify.get_t_atom body in
+      let time = PropertyNotify.get_t_time body in
+      let state = if PropertyNotify.get_t_state body = 0 then `NewValue else `Deleted in
+      handler#property_notify ~window ~atom ~time ~state
+    | `Event (SelectionClear, body) ->
+      let time = SelectionClear.get_t_time body in
+      let owner = SelectionClear.get_t_owner body in
+      let selection = SelectionClear.get_t_selection body in
+      handler#selection_clear ~time ~owner ~selection
+    | `Event (ClientMessage, body) ->
+      let window = Window.ClientMessage.get_t_window body in
+      let ty = Window.ClientMessage.get_t_ty body in
+      handler#client_message ~window ~ty (Cstruct.shift body Window.ClientMessage.sizeof_t)
+    | `Event (x, _body) ->
+      Log.info (fun f -> f "Got event %s" (code_to_string x))
+    | `Unknown_event x ->
+      Log.info (fun f -> f "Skipping unknown X11 message type %d" x)
   in
+  let rec aux () = handle_event (); aux () in
   aux ()

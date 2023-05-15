@@ -4,6 +4,8 @@
     The API corresponds fairly directly to the protocol description at
     https://www.x.org/releases/X11R7.7/doc/xproto/x11protocol.html *)
 
+open Eio.Std
+
 (** {2 Core protocol} *)
 
 module Xid : sig
@@ -18,11 +20,11 @@ module Display : sig
 
   type timestamp = private int32
 
-  val connect : Lwt_unix.file_descr -> t Lwt.t
-  (** [connect fd] performs an X11 handshake on [fd].
+  val connect : sw:Switch.t -> #Eio.Flow.two_way -> t
+  (** [connect ~sw fd] performs an X11 handshake on [fd].
       You must call {!Event.listen} after this to start processing events. *)
 
-  val sync : t -> unit Lwt.t
+  val sync : t -> unit
   (** [sync t] sends a dummy message and waits for the reply. *)
 end
 
@@ -32,11 +34,11 @@ module Atom : sig
   val pp : Display.t -> t Fmt.t
   (** [pp display] is a formatter that prints the name of the atom if cached, or its number otherwise. *)
 
-  val intern : Display.t -> ?only_if_exists:bool -> string -> t Lwt.t
+  val intern : Display.t -> ?only_if_exists:bool -> string -> t
   (** [intern display name] returns the atom corresponding to [name].
       The results are cached, so this is only slow the first time. *)
 
-  val get_name : Display.t -> t -> string Lwt.t
+  val get_name : Display.t -> t -> string
   (** [get_name display t] returns the name of [t] using [display]'s local cache.
       If the name isn't in the cache, it queries the X server. *)
 end
@@ -125,29 +127,29 @@ module Window : sig
     geometry:Geometry.t ->
     ?visual:visual ->
     create_attributes ->
-    t Lwt.t
+    t
   (** Create an InputOnly window (which can be used for e.g. receiving selections, but is not visible). *)
 
-  val change_attributes : Display.t -> t -> create_attributes -> unit Lwt.t
+  val change_attributes : Display.t -> t -> create_attributes -> unit
 
-  val get_geometry : Display.t -> t -> Geometry.t Lwt.t
+  val get_geometry : Display.t -> t -> Geometry.t
 
   type attributes = {
     window_class : [`InputOnly | `InputOutput];
     override_redirect : bool;
   }
 
-  val get_attributes : Display.t -> t -> attributes Lwt.t
+  val get_attributes : Display.t -> t -> attributes
 
   val send_client_message :
     Display.t -> t ->
     propagate:bool ->
     event_mask:Cstruct.uint32 ->
-    fmt:Cstruct.uint8 -> ty:Atom.t -> Cstruct.t -> unit Lwt.t
+    fmt:Cstruct.uint8 -> ty:Atom.t -> Cstruct.t -> unit
 
-  val map : Display.t -> t -> unit Lwt.t
+  val map : Display.t -> t -> unit
 
-  val destroy : Display.t -> t -> unit Lwt.t
+  val destroy : Display.t -> t -> unit
 
   type stack_mode = [
     | `Above
@@ -166,7 +168,7 @@ module Window : sig
     ?sibling:t ->
     ?stack_mode:stack_mode ->
     Display.t -> t ->
-    unit Lwt.t
+    unit
 
   val configure_checked :
     ?x:int ->
@@ -177,7 +179,7 @@ module Window : sig
     ?sibling:t ->
     ?stack_mode:stack_mode ->
     Display.t -> t ->
-    (unit, Error.code) result Lwt.t
+    (unit, Error.code) result
   (** Like {!configure}, but waits for the server to confirm that it worked. *)
 
   val configure_notify :
@@ -188,14 +190,14 @@ module Window : sig
     geometry:Geometry.t ->
     border_width:int ->
     override_redirect:bool ->
-    unit Lwt.t
+    unit
 
   val set_input_focus_checked :
     Display.t ->
     revert_to:[< `None | `PointerRoot | `Parent] ->
     time:[< `CurrentTime | `Time of Display.timestamp ] ->
     [< `Window of t | `PointerRoot | `None] ->
-    (unit, Error.code) result Lwt.t
+    (unit, Error.code) result
 end
 
 module Selection : sig
@@ -203,14 +205,14 @@ module Selection : sig
     Display.t -> Atom.t ->
     owner:Window.t option ->
     timestamp:[< `CurrentTime | `Time of Display.timestamp ] ->
-    unit Lwt.t
+    unit
 
   val convert :
     Display.t -> Atom.t ->
     requestor:Window.t ->
     target:Atom.t ->
     property:Atom.t option ->
-    time:[< `CurrentTime | `Time of Display.timestamp ] -> unit Lwt.t
+    time:[< `CurrentTime | `Time of Display.timestamp ] -> unit
 
   val notify :
     Display.t -> Atom.t ->
@@ -218,13 +220,13 @@ module Selection : sig
     requestor:Window.t ->
     target:Atom.t ->
     property:Atom.t option ->
-    unit Lwt.t
+    unit
 end
 
 module Font : sig
   type t = [`Font] Xid.t
 
-  val open_font : Display.t -> string -> t Lwt.t
+  val open_font : Display.t -> string -> t
 
   val create_glyph_cursor :
     Display.t ->
@@ -234,7 +236,7 @@ module Font : sig
     mask_char:Cstruct.uint16 ->
     fg:Cstruct.uint16 * Cstruct.uint16 * Cstruct.uint16 ->
     bg:Cstruct.uint16 * Cstruct.uint16 * Cstruct.uint16 ->
-    Window.cursor Lwt.t
+    Window.cursor
 end
 
 module Property : sig
@@ -245,11 +247,11 @@ module Property : sig
     bytes_after : int;
   }
 
-  val set_string : ty:Atom.t -> Display.t -> Window.t -> Atom.t -> string -> unit Lwt.t
+  val set_string : ty:Atom.t -> Display.t -> Window.t -> Atom.t -> string -> unit
 
-  val get_string : ?delete:bool -> Display.t -> Window.t -> Atom.t -> string option Lwt.t
-  val get_atoms  : ?delete:bool -> Display.t -> Window.t -> Atom.t -> Atom.t list Lwt.t
-  val get_atom   : ?delete:bool -> Display.t -> Window.t -> Atom.t -> Atom.t option Lwt.t
+  val get_string : ?delete:bool -> Display.t -> Window.t -> Atom.t -> string option
+  val get_atoms  : ?delete:bool -> Display.t -> Window.t -> Atom.t -> Atom.t list
+  val get_atom   : ?delete:bool -> Display.t -> Window.t -> Atom.t -> Atom.t option
 
   val get :
     ?delete:bool ->
@@ -257,13 +259,13 @@ module Property : sig
     long_offset:Cstruct.uint32 ->
     long_length:Cstruct.uint32 ->
     Display.t -> Window.t -> Atom.t ->
-    info option Lwt.t
+    info option
 
   val get_all :
     ?delete:bool ->
     ?ty:Atom.t ->
     Display.t -> Window.t -> Atom.t ->
-    Cstruct.t option Lwt.t
+    Cstruct.t option
   (** [get_all] uses {!get} to read as many chunks as needed and concatenates them. *)
 
   val change :
@@ -271,37 +273,37 @@ module Property : sig
     ty:Atom.t ->
     fmt:Cstruct.uint8 ->
     Display.t -> Window.t -> Atom.t ->
-    Cstruct.t -> unit Lwt.t
+    Cstruct.t -> unit
 
-  val delete : Display.t -> Window.t -> Atom.t -> unit Lwt.t
+  val delete : Display.t -> Window.t -> Atom.t -> unit
 end
 
 module Event : sig
   (** Note: the X11 event handler loop is blocked until the callback returns. *)
   type handler = <
-    map_request : window:Window.t -> unit Lwt.t;
+    map_request : window:Window.t -> unit;
 
     configure_request :
-      window:Window.t -> width:int -> height:int -> unit Lwt.t;
+      window:Window.t -> width:int -> height:int -> unit;
 
     client_message :
-      window:Window.t -> ty:Atom.t -> Cstruct.t -> unit Lwt.t;
+      window:Window.t -> ty:Atom.t -> Cstruct.t -> unit;
 
     selection_request :
       time:Display.timestamp -> owner:Window.t -> requestor:Window.t ->
-      selection:Atom.t -> target:Atom.t -> property:Atom.t option -> unit Lwt.t;
+      selection:Atom.t -> target:Atom.t -> property:Atom.t option -> unit;
 
     selection_clear :
-      time:Display.timestamp -> owner:Window.t -> selection:Atom.t -> unit Lwt.t;
+      time:Display.timestamp -> owner:Window.t -> selection:Atom.t -> unit;
 
     selection_notify :
-      time:Display.timestamp -> requestor:Window.t -> selection:Atom.t -> target:Atom.t -> property:Atom.t option -> unit Lwt.t;
+      time:Display.timestamp -> requestor:Window.t -> selection:Atom.t -> target:Atom.t -> property:Atom.t option -> unit;
 
     property_notify :
-      window:Window.t -> atom:Atom.t -> time:Display.timestamp -> state:[`NewValue | `Deleted] -> unit Lwt.t;
+      window:Window.t -> atom:Atom.t -> time:Display.timestamp -> state:[`NewValue | `Deleted] -> unit;
   >
 
-  val listen : Display.t -> handler -> 'a Lwt.t
+  val listen : Display.t -> handler -> 'a
   (** [listen t handler] runs the main event loop, dispatching events with [handler]. *)
 end
 
@@ -312,7 +314,7 @@ module Icccm : sig
     val min_size : t -> (int32 * int32) option
   end
 
-  val get_wm_normal_hints : Display.t -> Window.t -> Wm_normal_hints.t Lwt.t
+  val get_wm_normal_hints : Display.t -> Window.t -> Wm_normal_hints.t
 end
 
 (** {2 Extensions} *)
@@ -322,8 +324,8 @@ module Extension : sig
     major_opcode : int;
   }
 
-  val query : Display.t -> string -> info option Lwt.t
-  val query_exn : Display.t -> string -> info Lwt.t
+  val query : Display.t -> string -> info option
+  val query_exn : Display.t -> string -> info
 end
 
 module Composite : sig
@@ -332,9 +334,9 @@ module Composite : sig
   val redirect_subwindows :
     t ->
     window:Window.t ->
-    update:[< `Automatic | `Manual ] -> unit Lwt.t
+    update:[< `Automatic | `Manual ] -> unit
 
-  val init : Display.t -> t Lwt.t
+  val init : Display.t -> t
 end
 
 (** {2 Low-level API (for extensions)} *)
@@ -350,24 +352,24 @@ module Request : sig
     | Unchecked : unit checked
     | Checked : (unit, Error.code) result checked
 
-  val send_only : Display.t -> major:int -> ?minor:int -> int -> (Cstruct.t -> unit) -> unit Lwt.t
+  val send_only : Display.t -> major:int -> ?minor:int -> int -> (Cstruct.t -> unit) -> unit
   (** [send_only display ~major size build] creates an X11 request message with body size [size].
       It fills in the header part (using [major] and [minor], plus a fresh sequence number and the length),
       and then uses [build body] to fill in the body part.
       Use this for sending an X11 message that doesn't produce a reply.
       It returns as soon as the message is sent, and if we get an error response, it just logs it. *)
 
-  val send : Display.t -> major:int -> ?minor:int -> int -> (Cstruct.t -> unit) -> reply Lwt.t
+  val send : Display.t -> major:int -> ?minor:int -> int -> (Cstruct.t -> unit) -> reply
   (** Like {!send_only}, but expect (and wait for) the reply. *)
 
-  val send_checked : Display.t -> major:int -> ?minor:int -> int -> (Cstruct.t -> unit) -> (unit, Error.code) Lwt_result.t
+  val send_checked : Display.t -> major:int -> ?minor:int -> int -> (Cstruct.t -> unit) -> (unit, Error.code) result
   (** Send an X11 message that doesn't have a reply, and wait until we know it succeeded. *)
 
-  val send_maybe_checked : 'a checked -> Display.t -> major:int -> ?minor:int -> int -> (Cstruct.t -> unit) -> 'a Lwt.t
+  val send_maybe_checked : 'a checked -> Display.t -> major:int -> ?minor:int -> int -> (Cstruct.t -> unit) -> 'a
   (** [send_maybe_checked Checked] is [send_checked].
       [send_maybe_checked Unchecked] is [send_only]. *)
 
-  val send_exn : Display.t -> major:int -> ?minor:int -> int -> (Cstruct.t -> unit) -> Cstruct.t Lwt.t
+  val send_exn : Display.t -> major:int -> ?minor:int -> int -> (Cstruct.t -> unit) -> Cstruct.t
   (** Send an X11 message and wait for the reply. Raise an exception if we get an error. *)
 end
 

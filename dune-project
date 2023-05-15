@@ -12,7 +12,7 @@
    (logs (>= 0.7.0))
    (cmdliner (>= 1.1.0))
    (cstruct (>= 6.0.0))
-   (cstruct-lwt (>= 6.0.0))
+   (eio_main (>= 0.9))
    (ppx_cstruct (>= 6.0.0))
    (ocaml (>= 5.0.0))
    (fmt (>= 0.8.9))

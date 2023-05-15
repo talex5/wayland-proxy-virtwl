@@ -2,23 +2,26 @@ module Drm_format = Drm_format
 module Dev = Dev
 module Wayland_dmabuf = Wayland_dmabuf
 
-type transport = < Wayland.S.transport; close : unit Lwt.t >
+type transport = < Wayland.S.transport; close : unit >
 
 type t
 
-val find_device : ?dri_dir:string -> unit -> (t, [> `Msg of string]) Lwt_result.t
-(** [find_device ()] searches for a virtio-gpu device. *)
+val default_dri_dir : Eio.Fs.dir Eio.Path.t -> Eio.Fs.dir Eio.Path.t
+(** [default_dri_dir fs] is [fs / "/dev/dri"]. *)
 
-val connect_wayland : t -> transport Lwt.t
+val find_device : sw:Eio.Switch.t -> Eio.Fs.dir Eio.Path.t -> (t, [> `Msg of string]) result
+(** [find_device ~sw dri_dir] searches for a virtio-gpu device in [dri_dir] (see {!default_dri_dir}). *)
+
+val connect_wayland : sw:Eio.Switch.t -> t -> transport
 (** [connect_wayland t] creates a new Wayland transport from [t]. *)
 
-val close : t -> unit Lwt.t
+val close : t -> unit
 
 val alloc : t -> Dev.query -> Dev.image
 (** [alloc t query] allocates a buffer matching [query] on the host and returns a handle to it.
     Use {!Utils.safe_map_file} to map it. *)
 
-val probe_drm : t -> Wayland_dmabuf.t -> bool Lwt.t
+val probe_drm : t -> Wayland_dmabuf.t -> bool
 (** [probe_drm t dma] tries to create a buffer backed by video memory.
     Returns [true] if this works.
     Caches the result on [t] for future calls. *)

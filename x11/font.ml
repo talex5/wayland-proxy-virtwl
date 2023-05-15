@@ -1,5 +1,3 @@
-open Lwt.Syntax
-
 type t = Types.font
 
 module OpenFont = struct
@@ -15,13 +13,11 @@ module OpenFont = struct
   let send t name =
     let fid = Display.mint_id t in
     Log.info (fun f -> f "OpenFont %S as %a" name Xid.pp fid);
-    let+ () =
-      Request.send_only t ~major:45 (sizeof_req + Wire.round_up4 (String.length name)) (fun r ->
-          set_req_fid r fid;
-          set_req_name_len r (String.length name);
-          Cstruct.blit_from_string name 0 r sizeof_req (String.length name)
-        )
-    in
+    Request.send_only t ~major:45 (sizeof_req + Wire.round_up4 (String.length name)) (fun r ->
+        set_req_fid r fid;
+        set_req_name_len r (String.length name);
+        Cstruct.blit_from_string name 0 r sizeof_req (String.length name)
+      );
     fid
 end
 
@@ -47,7 +43,7 @@ module CreateGlyphCursor = struct
   let send t ~source_font ~mask_font ~source_char ~mask_char ~fg ~bg =
     let cid = Display.mint_id t in
     Log.info (fun f -> f "CreateGlyphCursor");
-    let+ () = Request.send_only t ~major:94 sizeof_req (fun r ->
+    Request.send_only t ~major:94 sizeof_req (fun r ->
         set_req_cid r cid;
         set_req_source_font r source_font;
         set_req_mask_font r mask_font;
@@ -61,7 +57,7 @@ module CreateGlyphCursor = struct
         set_req_bg_r r r2;
         set_req_bg_g r g2;
         set_req_bg_b r b2
-      ) in
+      );
     cid
 end
 

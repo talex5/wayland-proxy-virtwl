@@ -33,7 +33,7 @@ type xwayland_hooks = <
     unit;
   (** Called when the keyboard leaves a surface. *)
 
-  set_ping : (unit -> unit Lwt.t) -> unit;
+  set_ping : (unit -> unit) -> unit;
   (** When/if Xwayland creates an xdg_wm_base object, this is called to provide a ping function.
       This does a round-trip to the client, ensuring that all previously sent events have been delivered. *)
 
@@ -43,10 +43,10 @@ type xwayland_hooks = <
 
 type t
 
-val create : ?virtio_gpu:Virtio_gpu.t -> Config.t -> t Lwt.t
-(** [create config] creates a new relay and connects it to the host compositor. *)
+val create : ?virtio_gpu:Virtio_gpu.t -> sw:Eio.Switch.t -> net:#Eio_unix.Net.t -> Config.t -> t
+(** [create ~sw ~net config] creates a new relay and connects it to the host compositor. *)
 
-val accept : ?xwayland:xwayland_hooks -> t -> Lwt_unix.file_descr -> unit Lwt.t
+val accept : ?xwayland:xwayland_hooks -> t -> #Eio_unix.Net.stream_socket -> unit
 (** [accept t client] talks the Wayland protocol to [client], relaying messages via [t]. *)
 
 val registry : t -> Wayland.Registry.t
@@ -56,9 +56,6 @@ val update_serial : t -> int32 -> unit
 
 val last_serial : t -> int32
 (** [last_serial t] is the last known serial number from the host. *)
-
-val set_from_host_paused : t -> bool -> unit
-(** While paused, no further incoming messages from the host will be dispatched. *)
 
 val set_surface_data : _ H.Wl_surface.t -> surface_data -> unit
 (** [set_surface_data surface data] attaches [surface_data] to [surface]. *)
