@@ -1,8 +1,7 @@
 val listen :
   proc_mgr:#Eio_unix.Process.mgr ->
-  net:#Eio_unix.Net.t ->
   config:Config.t ->
-  virtio_gpu:Virtio_gpu.t option ->
+  connect_host:(sw:Eio.Switch.t -> Host.t) ->
   display:int ->
   #Eio_unix.Net.listening_socket ->
   'a

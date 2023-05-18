@@ -41,21 +41,8 @@ type xwayland_hooks = <
   (** The buffer scale to set and then use to transform coordinates (for HiDPI screens). *)
 >
 
-type t
-
-val create : ?virtio_gpu:Virtio_gpu.t -> sw:Eio.Switch.t -> net:#Eio_unix.Net.t -> Config.t -> t
-(** [create ~sw ~net config] creates a new relay and connects it to the host compositor. *)
-
-val accept : ?xwayland:xwayland_hooks -> t -> #Eio_unix.Net.stream_socket -> unit
-(** [accept t client] talks the Wayland protocol to [client], relaying messages via [t]. *)
-
-val registry : t -> Wayland.Registry.t
-
-val update_serial : t -> int32 -> unit
-(** [update_serial t serial] sets [serial] as the last known serial number from the host. *)
-
-val last_serial : t -> int32
-(** [last_serial t] is the last known serial number from the host. *)
+val run : ?xwayland:xwayland_hooks -> config:Config.t -> Host.t -> #Eio_unix.Net.stream_socket -> unit
+(** [accept ~config host client] talks the Wayland protocol to [client], relaying messages to [host]. *)
 
 val set_surface_data : _ H.Wl_surface.t -> surface_data -> unit
 (** [set_surface_data surface data] attaches [surface_data] to [surface]. *)
@@ -63,5 +50,3 @@ val set_surface_data : _ H.Wl_surface.t -> surface_data -> unit
 val get_surface_data : _ H.Wl_surface.t -> surface_data
 (** [get_surface_data surface] returns data previously set with [set_surface_data].
     If none is set, returns a private value of type [surface_data]. *)
-
-val dump : t Fmt.t

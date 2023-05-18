@@ -32,7 +32,7 @@ type 'a t = {
   ring : Cstruct.t;     (* Invalid if [is_closed] *)
   mutable pipe_of_id : pipe Res_handle.Map.t;
   mutable last_resource_id : Res_handle.t;
-  mutable alloc_cache : (query, image_template) Hashtbl.t;
+  alloc_cache : (query, image_template) Hashtbl.t;
 } constraint 'a = [< `Wayland | `Alloc ]
 
 let is_closed t =

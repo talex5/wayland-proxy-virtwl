@@ -74,20 +74,12 @@ let point_to_client ~xwayland (x, y) =
       Fixed.of_bits (Int32.mul (Fixed.to_bits y) scale)
     )
 
-type transport = < S.transport; close:unit >
-
 type t = {
-  sw : Switch.t;
+  host : Host.t;
   config : Config.t;
-  virtio_gpu : Virtio_gpu.t option;
-  host_transport : transport;
-  host_closed : unit Eio.Promise.or_exn;
-  host_display : Client.t;
-  host_registry : Wayland.Registry.t;
-  mutable last_serial : int32;
 }
 
-let update_serial t serial = t.last_serial <- serial
+let update_serial t serial = t.host.last_serial <- serial
 
 (* Data attached to host objects (e.g. the corresponding client object).
    Host and client versions are assumed to match. *)
@@ -1208,7 +1200,7 @@ let registry =
 let make_registry ~xwayland t reg =
   let registry =
     registry |> List.concat_map (fun (module M : Metadata.S) ->
-        match Registry.get t.host_registry M.interface with
+        match Registry.get t.host.registry M.interface with
         | [] ->
           Log.info (fun f -> f "Host doesn't support service %s, so skipping" M.interface);
           []
@@ -1240,14 +1232,14 @@ let make_registry ~xwayland t reg =
         Fmt.failwith "Entry %d has type %S, client expected %S!" name M.interface client_interface;
       let bind x =
         assert (x#min_version = 1l);
-        H.Wl_registry.bind (Registry.wl_registry t.host_registry) ~name:host_name (x, Proxy.version proxy)
+        H.Wl_registry.bind (Registry.wl_registry t.host.registry) ~name:host_name (x, Proxy.version proxy)
       in
       let open Protocols in
       let proxy = Proxy.cast_version proxy in
       match Proxy.ty proxy with
       | Wl_compositor.T -> make_compositor ~xwayland bind proxy
       | Wl_subcompositor.T -> make_subcompositor ~xwayland bind proxy
-      | Wl_shm.T -> make_shm ~virtio_gpu:t.virtio_gpu bind proxy
+      | Wl_shm.T -> make_shm ~virtio_gpu:t.host.virtio_gpu bind proxy
       | Wl_seat.T -> make_seat ~xwayland t bind proxy
       | Wl_output.T -> make_output ~xwayland bind proxy
       | Wl_data_device_manager.T -> make_data_device_manager ~xwayland bind proxy
@@ -1263,54 +1255,17 @@ let make_registry ~xwayland t reg =
       C.Wl_registry.global reg ~name:(Int32.of_int name) ~interface:M.interface ~version
     )
 
-let create ?virtio_gpu ~sw ~net (config : Config.t) =
-  let host_transport =
-    match virtio_gpu with
-    | Some virtio_gpu ->
-      let host_transport = Virtio_gpu.connect_wayland ~sw virtio_gpu in
-      (host_transport :> transport)
-    | None ->
-      let host_transport = Wayland.Unix_transport.connect ~sw ~net () in
-      (host_transport :> transport)
-  in
-  let host_display, host_closed = Wayland.Client.connect ~sw ~trace:(module Trace.Host) host_transport in
-  let host_registry = Wayland.Registry.of_display host_display in
-  let _dma =
-    match virtio_gpu with
-    | None -> None
-    | Some virtio_gpu ->
-      let dma = Virtio_gpu.Wayland_dmabuf.create host_display host_registry in
-      match dma with
-      | None ->
-        Log.info (fun f -> f "Host does not support dmabuf");
-        None
-      | Some dma ->
-        let supported = Virtio_gpu.probe_drm virtio_gpu dma in
-        if supported then (
-          Log.warn (fun f -> f "Host is using dmabuf - this probably won't work yet");
-          Some dma
-        ) else None
-  in
-  {
-    sw;
-    virtio_gpu;
-    host_transport;
-    host_closed;
-    host_display;
-    host_registry;
-    config;
-    last_serial = 0l;
-  }
-
-let accept ?xwayland t client =
+let run ?xwayland ~config host client =
+  Switch.run @@ fun sw ->
+  let t = { host; config } in
   let client_transport = Wayland.Unix_transport.of_socket client in
   let s : Server.t =
-    Server.connect ~sw:t.sw client_transport ~trace:(module Trace.Client) @@ object
+    Server.connect ~sw client_transport ~trace:(module Trace.Client) @@ object
       inherit [_] C.Wl_display.v1
       method on_get_registry _ ref = make_registry ~xwayland t ref
       method on_sync _ cb =
         Proxy.Handler.attach cb @@ new C.Wl_callback.v1;
-        let h : _ Proxy.t = H.Wl_display.sync (Client.wl_display t.host_display) @@ object
+        let h : _ Proxy.t = H.Wl_display.sync (Client.wl_display host.display) @@ object
             inherit [_] H.Wl_callback.v1
             method on_done ~callback_data =
               C.Wl_callback.done_ cb ~callback_data
@@ -1326,22 +1281,14 @@ let accept ?xwayland t client =
        if !is_active then (
          Log.info (fun f -> f "Client %a" pp_closed r);
          is_active := false;
-         t.host_transport#shutdown
-       )
+       );
+       Client.stop host.display
     )
     (fun () ->
-       let r = Promise.await t.host_closed in
+       let r = Promise.await host.closed in
        if !is_active then (
          Log.info (fun f -> f "Host %a" pp_closed r);
          is_active := false;
-         client_transport#shutdown
-       )
-    );
-  t.host_transport#close
-  (* Note: we don't close the client; the caller does that *)
-
-let registry t = t.host_registry
-let last_serial t = t.last_serial
-
-let dump f t =
-  Client.dump f t.host_display
+       );
+       Server.stop s
+    )

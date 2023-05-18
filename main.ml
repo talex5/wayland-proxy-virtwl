@@ -2,12 +2,11 @@ open Eio.Std
 
 let on_error ex = traceln "Error handling client: %a" Fmt.exn ex
 
-let listen ~net ~config ~virtio_gpu socket =
+let listen ~connect_host ~config socket =
   Eio.Net.run_server socket ~on_error (fun conn addr ->
       Log.info (fun f -> f "New connection from %a" Eio.Net.Sockaddr.pp addr);
       Switch.run @@ fun sw ->
-      let r = Relay.create ?virtio_gpu ~sw ~net config in
-      Relay.accept r conn
+      Relay.run ~config (connect_host ~sw) conn
     )
 
 (* Connect to socket at [path] (and then close it), to see if anyone's already listening there. *)
@@ -22,7 +21,7 @@ let is_listening path =
     false
 
 (* Start listening for connections to [wayland_display]. *)
-let listen_wayland ~sw ~net ~config ~virtio_gpu wayland_display = 
+let listen_wayland ~sw ~net ~connect_host ~config wayland_display = 
   let socket_path = Wayland.Unix_transport.socket_path ~wayland_display () in
   let existing_socket = Sys.file_exists socket_path in
   if existing_socket && is_listening socket_path then (
@@ -31,12 +30,12 @@ let listen_wayland ~sw ~net ~config ~virtio_gpu wayland_display =
     if existing_socket then Unix.unlink socket_path;
     let listening_socket = Eio.Net.listen ~backlog:5 ~sw net (`Unix socket_path) in
     Log.info (fun f -> f "Listening on %S for Wayland clients" socket_path);
-    Fiber.fork_daemon ~sw (fun () -> listen ~net ~config ~virtio_gpu listening_socket);
+    Fiber.fork_daemon ~sw (fun () -> listen ~config ~connect_host listening_socket);
     `Ok ()
   )
 
 (* Start listening for connections to [x_display] and set $DISPLAY. *)
-let listen_x11 ~sw ~net ~proc_mgr ~config ~virtio_gpu x_display = 
+let listen_x11 ~sw ~net ~proc_mgr ~config ~connect_host x_display = 
   let xwayland_listening_socket =
     let path = Printf.sprintf "\x00/tmp/.X11-unix/X%d" x_display in
     let sock = Eio.Net.listen ~sw net (`Unix path) ~backlog:5 in
@@ -44,7 +43,7 @@ let listen_x11 ~sw ~net ~proc_mgr ~config ~virtio_gpu x_display =
     sock
   in
   Fiber.fork_daemon ~sw (fun () ->
-      Xwayland.listen ~net ~proc_mgr ~config ~virtio_gpu ~display:x_display xwayland_listening_socket
+      Xwayland.listen ~proc_mgr ~config ~connect_host ~display:x_display xwayland_listening_socket
     );
   Unix.putenv "DISPLAY" (Printf.sprintf ":%d" x_display)
 
@@ -63,12 +62,24 @@ let main ~env setup_tracing use_virtio_gpu wayland_display x_display config args
     else None
   in
   setup_tracing ~wayland_display;
+  let connect_host ~sw =
+    let transport =
+      match virtio_gpu with
+      | Some virtio_gpu ->
+        let transport = Virtio_gpu.connect_wayland ~sw virtio_gpu in
+        (transport :> Wayland.S.transport)
+      | None ->
+        let transport = Wayland.Unix_transport.connect ~sw ~net () in
+        (transport :> Wayland.S.transport)
+    in
+    Host.connect ?virtio_gpu ~sw transport
+  in
   (* Listen for incoming Wayland client connections: *)
-  match listen_wayland ~sw ~net ~config ~virtio_gpu wayland_display with
+  match listen_wayland ~sw ~net ~config ~connect_host wayland_display with
   | `Error _ as e -> e
   | `Ok () ->
     (* Listen for incoming X11 client connections, if configured: *)
-    Option.iter (listen_x11 ~sw ~net ~proc_mgr ~config ~virtio_gpu) x_display;
+    Option.iter (listen_x11 ~sw ~net ~proc_mgr ~config ~connect_host) x_display;
     (* Run the application (if any), or just wait (if not): *)
     match args with
     | [] -> Fiber.await_cancel ()

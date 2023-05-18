@@ -66,7 +66,6 @@ let pp_paired f { window; xdg_surface; xdg_role; geometry; override_redirect } =
 
 type t = {
   sw : Switch.t;
-  relay : Relay.t;
   x11 : X11.Display.t Promise.or_exn;
   config : Config.t;
   wm_base : [`V1] Xdg_wm_base.t;
@@ -131,7 +130,7 @@ module Selection = struct
   type notify_key = {
     selection : X11.Atom.t;
     target : X11.Atom.t;
-  }
+  } [@@warning "-69"]
 
   type t = {
     sw : Eio.Switch.t;
@@ -145,7 +144,7 @@ module Selection = struct
     set_selection_window : X11.Window.t Promise.u;
     clipboard_window : X11.Window.t Promise.t;
     set_clipboard_window : X11.Window.t Promise.u;
-    relay : Relay.t;
+    host : Host.t;
 
     (* When we request an X11 selection, we add the callback for the response here. *)
     awaiting_notify : (notify_key, (X11.Display.timestamp * X11.Atom.t) option -> unit) Hashtbl.t;
@@ -382,7 +381,7 @@ module Selection = struct
         end
       in
       targets |> List.iter (fun mime_type -> Primary_source.offer source ~mime_type);
-      Primary_device.set_selection primary_device ~source:(Some source) ~serial:(Relay.last_serial t.relay)
+      Primary_device.set_selection primary_device ~source:(Some source) ~serial:(Host.last_serial t.host)
 
   (* Similar to {!set_x_owned_primary}, but for Wayland's clipboard API. *)
   let set_x_owned_clipboard t =
@@ -424,7 +423,7 @@ module Selection = struct
       end
     in
     targets |> List.iter (fun mime_type -> Clipboard_source.offer source ~mime_type);
-    Clipboard_device.set_selection t.clipboard_device ~source:(Some source) ~serial:(Relay.last_serial t.relay)
+    Clipboard_device.set_selection t.clipboard_device ~source:(Some source) ~serial:(Host.last_serial t.host)
 
   (* Handle a SelectionClear event from Xwayland. *)
   let selection_clear t ~time:_ ~owner:_ ~selection =
@@ -467,14 +466,14 @@ module Selection = struct
     | _ ->
       failwith "Expected exactly one X11 root window!"
 
-  let create ~sw ~relay ~seat ~x11 ~registry =
-    let clipboard_mgr = Wayland.Registry.bind registry @@ new Clipboard_mgr.v1 in
+  let create ~sw ~(host:Host.t) ~seat ~x11 =
+    let clipboard_mgr = Wayland.Registry.bind host.registry @@ new Clipboard_mgr.v1 in
     let selection_window, set_selection_window = Promise.create () in
     let clipboard_window, set_clipboard_window = Promise.create () in
     let wayland_primary_offer = ref None in
     let wayland_clipboard_offer = ref None in
     let primary_selection =
-      match Wayland.Registry.bind registry @@ new Primary_mgr.v1 with
+      match Wayland.Registry.bind host.registry @@ new Primary_mgr.v1 with
       | mgr ->
         let dev = Primary_mgr.get_device mgr ~seat @@ primary_device ~wayland_primary_offer in
         Some (mgr, dev)
@@ -486,7 +485,7 @@ module Selection = struct
     {
       sw;
       x11;
-      relay;
+      host;
       awaiting_notify = Hashtbl.create 1;
       (* Primary: *)
       wayland_primary_offer;
@@ -983,32 +982,30 @@ let monitor name thread () =
 
 (* We've just spawned an Xwayland process.
    Talk to it using the Wayland and X11 protocols. *)
-let handle_xwayland ~net ~config ~virtio_gpu ~local_wayland ~local_wm_socket =
+let handle_xwayland ~config ~local_wayland ~local_wm_socket ~connect_host =
   Switch.run @@ fun sw ->
   let x11 = Fiber.fork_promise ~sw (fun () -> X11.Display.connect ~sw local_wm_socket) in
-  let relay = Relay.create ?virtio_gpu ~sw ~net config in
-  let registry = Relay.registry relay in
-  let wm_base = Wayland.Registry.bind registry @@ object
+  let host : Host.t = connect_host ~sw in
+  let wm_base = Wayland.Registry.bind host.registry @@ object
       inherit [_] Xdg_wm_base.v1
       method on_ping = Xdg_wm_base.pong
     end
   in
-  let seat = Wayland.Registry.bind registry @@ object
+  let seat = Wayland.Registry.bind host.registry @@ object
       inherit [_] Wl_seat.v1
       method on_name _ ~name:_ = ()
       method on_capabilities _ ~capabilities:_ = ()
     end
   in
   let decor_mgr =
-    try Some (Wayland.Registry.bind registry @@ new Xdg_decor_mgr.v1)
+    try Some (Wayland.Registry.bind host.registry @@ new Xdg_decor_mgr.v1)
     with ex ->
       Log.warn (fun f -> f "Can't get decoration manager: %a" Fmt.exn ex);
       None
   in
-  let selection = Selection.create ~sw ~seat ~x11 ~registry ~relay in
+  let selection = Selection.create ~sw ~seat ~x11 ~host in
   let t = {
     sw;
-    relay;
     x11;
     config;
     wm_base;
@@ -1061,12 +1058,12 @@ let handle_xwayland ~net ~config ~virtio_gpu ~local_wayland ~local_wm_socket =
   end in
   let xrdb = String.concat "\n" config.xrdb in
   Fiber.all [
-    monitor "Xwayland Wayland thread" (fun () -> Relay.accept relay ~xwayland local_wayland);
+    monitor "Xwayland Wayland thread" (fun () -> Relay.run ~config ~xwayland host local_wayland);
     monitor "Xwayland X11 thread"     (fun () -> listen_x11 ~selection t);
     monitor "Xwayland WM init thread" (fun () -> initialise_x ~xrdb ~selection t);
   ]
 
-let spawn_and_run_xwayland ~proc_mgr ~net ~config ~virtio_gpu ~display listen_socket =
+let spawn_and_run_xwayland ~proc_mgr ~config ~connect_host ~display listen_socket =
   Switch.run @@ fun sw ->
   (* Set up connections between us and Xwayland: *)
   let local_wm_socket, remote_wm_socket = Eio_unix.Net.socketpair_stream ~sw () in
@@ -1114,7 +1111,7 @@ let spawn_and_run_xwayland ~proc_mgr ~net ~config ~virtio_gpu ~display listen_so
   Eio.Flow.close remote_wayland;
   begin
     try
-      handle_xwayland ~net ~config ~virtio_gpu ~local_wayland ~local_wm_socket
+      handle_xwayland ~config ~connect_host ~local_wayland ~local_wm_socket
     with ex ->
       Log.warn (fun f -> f "X11 WM failed: %a" Fmt.exn ex)
   end;
@@ -1124,13 +1121,13 @@ let spawn_and_run_xwayland ~proc_mgr ~net ~config ~virtio_gpu ~display listen_so
 let await_readable r =
   Eio_unix.Fd.use_exn "await_readable" (Eio_unix.Resource.fd r) Eio_unix.await_readable
 
-let listen ~proc_mgr ~net ~config ~virtio_gpu ~display listen_socket =
+let listen ~proc_mgr ~config ~connect_host ~display listen_socket =
   let rec aux () =
     Log.info (fun f -> f "Waiting for X11 clients");
     await_readable listen_socket;
     Log.info (fun f -> f "X client detected - launching %S..." config.Config.xwayland_binary);
     let t0 = Unix.gettimeofday () in
-    spawn_and_run_xwayland ~proc_mgr ~net ~config ~virtio_gpu ~display listen_socket;
+    spawn_and_run_xwayland ~proc_mgr ~config ~connect_host ~display listen_socket;
     let delay = min_respawn_time -. (Unix.gettimeofday () -. t0) in
     if delay > 0.0 then (
       Log.info (fun f -> f "Xwayland died too quickly... waiting a bit before retrying...");

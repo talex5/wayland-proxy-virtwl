@@ -1,4 +1,4 @@
-(lang dune 2.8)
+(lang dune 3.7)
 (name wayland-proxy-virtwl)
 (formatting disabled)
 (generate_opam_files true)
