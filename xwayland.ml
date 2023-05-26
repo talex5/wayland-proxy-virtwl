@@ -973,13 +973,6 @@ let quiet_logging () =
   Log.debug (fun _ -> quiet := false);
   !quiet
 
-let monitor name thread () =
-  try
-    thread ();
-    Log.info (fun f -> f "%s finished" name)
-  with ex ->
-    Log.warn (fun f -> f "%s failed: %a" name Fmt.exn ex)
-
 (* We've just spawned an Xwayland process.
    Talk to it using the Wayland and X11 protocols. *)
 let handle_xwayland ~config ~local_wayland ~local_wm_socket ~connect_host =
@@ -1058,9 +1051,9 @@ let handle_xwayland ~config ~local_wayland ~local_wm_socket ~connect_host =
   end in
   let xrdb = String.concat "\n" config.xrdb in
   Fiber.all [
-    monitor "Xwayland Wayland thread" (fun () -> Relay.run ~config ~xwayland host local_wayland);
-    monitor "Xwayland X11 thread"     (fun () -> listen_x11 ~selection t);
-    monitor "Xwayland WM init thread" (fun () -> initialise_x ~xrdb ~selection t);
+    (fun () -> Relay.run ~config ~xwayland host local_wayland);
+    (fun () -> listen_x11 ~selection t);
+    (fun () -> initialise_x ~xrdb ~selection t);
   ]
 
 let spawn_and_run_xwayland ~proc_mgr ~config ~connect_host ~display listen_socket =
