@@ -29,6 +29,7 @@ type 'a t = {
   sw : Switch.t;
   fd : Eio_unix.Fd.t;
   ring_handle : gem_handle;
+  unmap_ring : unit Lazy.t;     (* Force after closing [fd] to unmap ring. *)
   ring : Cstruct.t;     (* Invalid if [is_closed] *)
   mutable pipe_of_id : pipe Res_handle.Map.t;
   mutable last_resource_id : Res_handle.t;
@@ -115,13 +116,20 @@ let of_fd ~sw fd =
     (* Map it into our address space *)
     let offset = drm_map unix_fd ring_handle in
     let ring = Utils.safe_map_file unix_fd ~pos:offset ~len:page_size ~host_size:page_size ~kind:Bigarray.char in
+    let unmap_ring = lazy (
+      Log.info (fun f -> f "Closing %a and unmapping device" Eio_unix.Fd.pp fd);
+      let closed = Eio_unix.Fd.use fd (Fun.const false) ~if_closed:(Fun.const true) in
+      if not closed then Eio_unix.Fd.close fd;  (* Prevents further ring use *)
+      Utils.unmap (Bigarray.genarray_of_array1 ring)
+    ) in
+    Switch.on_release sw (fun () -> Lazy.force unmap_ring);
     (* Tell Linux to use it for Wayland *)
     let init = Cross_domain_init.create ~ring:ring_id ~channel_type:`Wayland in
     drm_exec_buffer unix_fd init;
     Some {
       sw;
       fd;
-      ring_handle; ring = Cstruct.of_bigarray ring;
+      ring_handle; ring = Cstruct.of_bigarray ring; unmap_ring;
       pipe_of_id = Res_handle.Map.empty;
       last_resource_id = Res_handle.init;
       alloc_cache = Hashtbl.create 100;
@@ -270,5 +278,4 @@ let handle_event ~sw t buf =
     ~read_pipe:(fun ~id ~hang_up data -> Recv.pipe_host_to_guest t ~id ~hang_up data; `Again)
 
 let close t =
-  Eio_unix.Fd.close t.fd;
-  Utils.unmap (Bigarray.genarray_of_array1 t.ring.buffer)
+  Lazy.force t.unmap_ring
