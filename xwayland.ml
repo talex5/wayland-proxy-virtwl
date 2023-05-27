@@ -651,53 +651,56 @@ let last_event_surface t =
    Note that [host_surface] may have already been destroyed by the time we get here. *)
 let pair t ~set_configured ~host_surface window =
   let x11 = Promise.await_exn t.x11 in
-  (* Get notified of title changes *)
-  X11.Window.create_attributes ~event_mask:[X11.Window.PropertyChange] ()
-  |> X11.Window.change_attributes x11 window;
-  let info = examine_window t window in
-  if Proxy.can_send host_surface then (
-    let parent = Option.bind info.transient_for (Hashtbl.find_opt t.paired) in
-    let xdg_surface = Xdg_wm_base.get_xdg_surface t.wm_base ~surface:host_surface @@ object
-        inherit [_] Xdg_surface.v1
-        method on_configure proxy ~serial =
-          if Proxy.can_send proxy then Xdg_surface.ack_configure proxy ~serial;
-          set_configured (
-            match info.geometry with
-            | { width = 1; height = 1; _ } when info.win_attrs.override_redirect -> `Hide 
-            | _ -> `Show
-          )
-      end in
-    let paired = {
-      window;
-      xdg_surface;
-      geometry = info.geometry;
-      xdg_role = `None;
-      override_redirect = info.win_attrs.override_redirect;
-    } in
-    Hashtbl.add t.paired window paired;
-    Relay.set_surface_data host_surface (X11 paired);
-    let fallback_parent = if parent = None then last_event_surface t else parent in
-    match info.window_type, fallback_parent with
-    | (`Normal | `Dialog), _
-    | _, None ->  (* (if we don't have a parent, then we must make it a top-level) *)
-      Log.info (fun f -> f "Open %a as top-level" pp_paired paired);
-      let toplevel = init_toplevel t ~x11 ~xdg_surface ~info ~paired window in
-      paired.xdg_role <- `Toplevel toplevel;
-      let parent = if info.window_type = `Normal then parent else fallback_parent in
-      parent |> Option.iter (fun parent ->
-          match parent.xdg_role with
-          | `Toplevel parent -> Xdg_toplevel.set_parent toplevel ~parent:(Some parent)
-          | _ -> Log.info (fun f -> f "Parent %a is not a toplevel!" pp_paired parent)
-        );
-      Wayland.Wayland_client.Wl_surface.commit host_surface
-    | (`DnD | `Popup | `Unknown), Some parent ->
-      Log.info (fun f -> f "Open %a as popup" pp_paired paired);
-      let popup = init_popup t ~x11 ~xdg_surface ~info ~parent ~paired window in
-      paired.xdg_role <- `Popup popup;
-      Wayland.Wayland_client.Wl_surface.commit host_surface
-  ) else (
-    Log.info (fun f -> f "%a destroyed while we were examining the X11 window properties!" Proxy.pp host_surface)
-  )
+  try
+    (* Get notified of title changes *)
+    X11.Window.create_attributes ~event_mask:[X11.Window.PropertyChange] ()
+    |> X11.Window.change_attributes x11 window;
+    let info = examine_window t window in
+    if Proxy.can_send host_surface then (
+      let parent = Option.bind info.transient_for (Hashtbl.find_opt t.paired) in
+      let xdg_surface = Xdg_wm_base.get_xdg_surface t.wm_base ~surface:host_surface @@ object
+          inherit [_] Xdg_surface.v1
+          method on_configure proxy ~serial =
+            if Proxy.can_send proxy then Xdg_surface.ack_configure proxy ~serial;
+            set_configured (
+              match info.geometry with
+              | { width = 1; height = 1; _ } when info.win_attrs.override_redirect -> `Hide 
+              | _ -> `Show
+            )
+        end in
+      let paired = {
+        window;
+        xdg_surface;
+        geometry = info.geometry;
+        xdg_role = `None;
+        override_redirect = info.win_attrs.override_redirect;
+      } in
+      Hashtbl.add t.paired window paired;
+      Relay.set_surface_data host_surface (X11 paired);
+      let fallback_parent = if parent = None then last_event_surface t else parent in
+      match info.window_type, fallback_parent with
+      | (`Normal | `Dialog), _
+      | _, None ->  (* (if we don't have a parent, then we must make it a top-level) *)
+        Log.info (fun f -> f "Open %a as top-level" pp_paired paired);
+        let toplevel = init_toplevel t ~x11 ~xdg_surface ~info ~paired window in
+        paired.xdg_role <- `Toplevel toplevel;
+        let parent = if info.window_type = `Normal then parent else fallback_parent in
+        parent |> Option.iter (fun parent ->
+            match parent.xdg_role with
+            | `Toplevel parent -> Xdg_toplevel.set_parent toplevel ~parent:(Some parent)
+            | _ -> Log.info (fun f -> f "Parent %a is not a toplevel!" pp_paired parent)
+          );
+        Wayland.Wayland_client.Wl_surface.commit host_surface
+      | (`DnD | `Popup | `Unknown), Some parent ->
+        Log.info (fun f -> f "Open %a as popup" pp_paired paired);
+        let popup = init_popup t ~x11 ~xdg_surface ~info ~parent ~paired window in
+        paired.xdg_role <- `Popup popup;
+        Wayland.Wayland_client.Wl_surface.commit host_surface
+    ) else (
+      Log.info (fun f -> f "%a destroyed while we were examining the X11 window properties!" Proxy.pp host_surface)
+    )
+  with Eio.Io (X11.Error.E X11_error _, _) as ex ->
+    Log.warn (fun f -> f "Error setting up window %a: %a" Proxy.pp host_surface Eio.Exn.pp ex)
 
 (* We got an X11 message saying X11 [window] corresponds to Wayland surface [wayland_id].
    Turn [wayland_id] into an xdg_surface. If we haven't seen that surface yet, wait until it appears
