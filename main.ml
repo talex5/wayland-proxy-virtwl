@@ -126,6 +126,7 @@ let args =
 
 let () =
   traceln "Starting experimental Eio version!";
+  Printexc.record_backtrace true;
   Eio_main.run @@ fun env ->
   let fs = fst env#fs in
   Switch.run @@ fun sw ->
