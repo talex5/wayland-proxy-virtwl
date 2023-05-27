@@ -34,6 +34,11 @@ type t = Cstruct.t
   } [@@little_endian]
 ]
 
+type error =
+  | X11_error of Cstruct.t
+
+type Eio.Exn.err += E of error
+
 let pp_code f x = Fmt.string f (code_to_string x)
 
 let pp f e =
@@ -43,4 +48,11 @@ let pp f e =
     (get_error_major_opcode e) (get_error_minor_opcode e)
     (get_error_seq e)
 
-let to_exn e = Failure (Fmt.str "%a" pp e)
+let () =
+  Eio.Exn.register_pp (fun f -> function
+      | E X11_error e -> pp f e; true
+      | _ -> false
+    )
+
+let to_exn e =
+  Eio.Exn.create (E (X11_error e))
