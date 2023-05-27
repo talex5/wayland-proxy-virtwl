@@ -219,7 +219,10 @@ module Recv = struct
          try
            let buf = Cstruct.create 4096 in
            let rec loop () =
-             let got = Eio.Flow.single_read r buf in
+             let got =
+               try Eio.Flow.single_read r buf
+               with End_of_file -> 0
+             in
              Log.info (fun f -> f "Read %d bytes from local pipe" got);
              let msg = Cross_domain_read_write.create ~id (Cstruct.sub buf 0 got) in
              Eio_unix.Fd.use_exn "make_write_pipe" (get_dev t) (fun dev ->
