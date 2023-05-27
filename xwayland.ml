@@ -1102,15 +1102,13 @@ let spawn_and_run_xwayland ~proc_mgr ~config ~connect_host ~display listen_socke
   in
   Eio.Flow.close remote_wm_socket;
   Eio.Flow.close remote_wayland;
-  begin
-    try
-      handle_xwayland ~config ~connect_host ~local_wayland ~local_wm_socket
-    with ex ->
-      let bt = Printexc.get_raw_backtrace () in
-      Log.warn (fun f -> f "X11 WM failed: %a" Fmt.exn_backtrace (ex, bt))
-  end;
-  let status = Eio.Process.await child in
-  Log.info (fun f -> f "Xwayland process ended (%a)" Eio.Process.pp_status status)
+  try
+    handle_xwayland ~config ~connect_host ~local_wayland ~local_wm_socket;
+    let status = Eio.Process.await child in
+    Log.info (fun f -> f "Xwayland process ended (%a)" Eio.Process.pp_status status)
+  with ex ->
+    let bt = Printexc.get_raw_backtrace () in
+    Log.warn (fun f -> f "X11 WM failed: %a" Fmt.exn_backtrace (ex, bt))
 
 let await_readable r =
   Eio_unix.Fd.use_exn "await_readable" (Eio_unix.Resource.fd r) Eio_unix.await_readable
