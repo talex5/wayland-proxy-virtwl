@@ -68,6 +68,11 @@ module Error : sig
   val pp_code : code Fmt.t
   val pp : t Fmt.t
   val to_exn : t -> exn
+
+  type error =
+    | X11_error of t
+
+  type Eio.Exn.err += E of error
 end
 
 module Geometry : sig
