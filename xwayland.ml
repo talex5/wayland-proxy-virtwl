@@ -1109,7 +1109,9 @@ let spawn_and_run_xwayland ~proc_mgr ~config ~connect_host ~display listen_socke
     handle_xwayland ~config ~connect_host ~local_wayland ~local_wm_socket;
     let status = Eio.Process.await child in
     Log.info (fun f -> f "Xwayland process ended (%a)" Eio.Process.pp_status status)
-  with ex ->
+  with
+  | Eio.Cancel.Cancelled _ as ex -> raise ex
+  | ex ->
     let bt = Printexc.get_raw_backtrace () in
     Log.warn (fun f -> f "X11 WM failed: %a" Fmt.exn_backtrace (ex, bt))
 
