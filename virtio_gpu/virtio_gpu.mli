@@ -6,10 +6,10 @@ type transport = < Wayland.S.transport; close : unit >
 
 type t
 
-val default_dri_dir : Eio.Fs.dir Eio.Path.t -> Eio.Fs.dir Eio.Path.t
+val default_dri_dir : 'a Eio.Path.t -> 'a Eio.Path.t
 (** [default_dri_dir fs] is [fs / "/dev/dri"]. *)
 
-val find_device : sw:Eio.Switch.t -> Eio.Fs.dir Eio.Path.t -> (t, [> `Msg of string]) result
+val find_device : sw:Eio.Switch.t -> _ Eio.Path.t -> (t, [> `Msg of string]) result
 (** [find_device ~sw dri_dir] searches for a virtio-gpu device in [dri_dir] (see {!default_dri_dir}). *)
 
 val connect_wayland : sw:Eio.Switch.t -> t -> transport

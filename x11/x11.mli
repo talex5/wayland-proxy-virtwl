@@ -20,7 +20,7 @@ module Display : sig
 
   type timestamp = private int32
 
-  val connect : sw:Switch.t -> #Eio.Flow.two_way -> t
+  val connect : sw:Switch.t -> _ Eio.Net.stream_socket -> t
   (** [connect ~sw fd] performs an X11 handshake on [fd].
       You must call {!Event.listen} after this to start processing events. *)
 

@@ -41,7 +41,7 @@ type xwayland_hooks = <
   (** The buffer scale to set and then use to transform coordinates (for HiDPI screens). *)
 >
 
-val run : ?xwayland:xwayland_hooks -> config:Config.t -> Host.t -> #Eio_unix.Net.stream_socket -> unit
+val run : ?xwayland:xwayland_hooks -> config:Config.t -> Host.t -> _ Eio_unix.Net.stream_socket -> unit
 (** [accept ~config host client] talks the Wayland protocol to [client], relaying messages to [host]. *)
 
 val set_surface_data : _ H.Wl_surface.t -> surface_data -> unit

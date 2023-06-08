@@ -2,7 +2,7 @@ open Eio.Std
 
 open Types
 
-type pipe = Eio_unix.sink
+type pipe = Eio_unix.sink_ty r
 
 type image_template = {
   template_id : Res_handle.t;
@@ -178,7 +178,7 @@ let create_send t data fds =
     | Unix.{ st_kind = S_FIFO; _ } ->
       (* Send a pipe *)
       let fd = Unix.dup ~cloexec:true fd in
-      let pipe = (Eio_unix.Net.import_socket_stream ~sw:t.sw ~close_unix:true fd :> Eio_unix.sink) in
+      let pipe = (Eio_unix.Net.import_socket_stream ~sw:t.sw ~close_unix:true fd :> Eio_unix.sink_ty r) in
       let id = Res_handle.next t.last_resource_id in
       t.pipe_of_id <- Res_handle.Map.add id pipe t.pipe_of_id;
       t.last_resource_id <- id;

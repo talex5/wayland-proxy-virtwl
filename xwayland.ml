@@ -965,7 +965,7 @@ let no_wayland_ping () =
   Eio_unix.sleep 0.01
 
 let int_fd_of_resource r =
-  Eio_unix.Fd.use_exn "string_of_fd" (Eio_unix.Resource.fd r) @@ fun fd ->
+  Eio_unix.Fd.use_exn "string_of_fd" (Eio_unix.Net.fd r) @@ fun fd ->
   let fd : int = Obj.magic (fd : Unix.file_descr) in
   fd
 
@@ -1076,7 +1076,7 @@ let spawn_and_run_xwayland ~proc_mgr ~config ~connect_host ~display listen_socke
     "-wm"; string_of_fd remote_wm_socket;
     Printf.sprintf ":%d" display
   ] in
-  let inherit_fd r = (int_fd_of_resource r, Eio_unix.Resource.fd r, `Blocking) in
+  let inherit_fd r = (int_fd_of_resource r, Eio_unix.Net.fd r, `Blocking) in
   let env =
     Unix.environment ()
     |> Array.to_list
@@ -1116,7 +1116,7 @@ let spawn_and_run_xwayland ~proc_mgr ~config ~connect_host ~display listen_socke
     Log.warn (fun f -> f "X11 WM failed: %a" Fmt.exn_backtrace (ex, bt))
 
 let await_readable r =
-  Eio_unix.Fd.use_exn "await_readable" (Eio_unix.Resource.fd r) Eio_unix.await_readable
+  Eio_unix.Fd.use_exn "await_readable" (Eio_unix.Net.fd r) Eio_unix.await_readable
 
 let listen ~proc_mgr ~config ~connect_host ~display listen_socket =
   let rec aux () =

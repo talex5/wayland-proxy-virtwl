@@ -6,7 +6,7 @@ module Utils = Utils
 type transport = < Wayland.S.transport; close : unit >
 
 type t = {
-  device_path : Eio.Fs.dir Eio.Path.t;
+  device_path : Eio.Fs.dir_ty Eio.Path.t;
   alloc : [`Alloc] Dev.t;
   mutable have_dmabuf : bool option;    (* None if we haven't checked yet *)
 }
@@ -97,6 +97,7 @@ let find_device_gen ~dri_dir init =
 
 let find_device ~sw dri_dir =
   let init device_path =
+    let device_path = (device_path :> Eio.Fs.dir_ty Eio.Path.t) in
     let conn = Eio.Path.open_out ~sw ~create:`Never device_path in
     match Dev.of_fd ~sw (Eio_unix.Resource.fd_opt conn |> Option.get) with
     | None -> Eio.Flow.close conn; None

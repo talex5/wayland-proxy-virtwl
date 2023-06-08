@@ -1,3 +1,4 @@
+open Eio.Std
 open Types
 
 module Read = Eio.Buf_read
@@ -182,7 +183,7 @@ let connect ~sw socket =
   let reply = Connection_setup.read_response from_server in
   {
     sw;
-    socket = (socket :> Eio.Flow.two_way);
+    socket = (socket :> [`Generic] Eio.Net.stream_socket_ty r);
     from_server;
     next_seq = 1;
     pending = Queue.create ();
