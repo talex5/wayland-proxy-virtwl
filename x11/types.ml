@@ -16,7 +16,7 @@ type reply = [
 
 type display = {
   sw : Eio.Switch.t;
-  socket : Eio.Flow.two_way;
+  socket : Eio.Net.stream_socket_ty r;
   from_server : Eio.Buf_read.t;
   roots : window list;
   mutable next_seq : int;

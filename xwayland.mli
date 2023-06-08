@@ -3,7 +3,7 @@ val listen :
   config:Config.t ->
   connect_host:(sw:Eio.Switch.t -> Host.t) ->
   display:int ->
-  _ #Eio_unix.Net.listening_socket ->
+  _ Eio_unix.Net.listening_socket ->
   'a
 (** [listen ~config ~virtio_gpu ~display fd] waits for a connection on [fd].
     If one arrives, it spawns Xwayland to handle it (and any further connections).
