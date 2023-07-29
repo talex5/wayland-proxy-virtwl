@@ -6,6 +6,7 @@ module Log = Log.Xwayland
 
 module Proxy = Wayland.Proxy
 module Wl_seat = Wayland.Wayland_client.Wl_seat
+module Wl_surface = Wayland.Wayland_client.Wl_surface
 module Xdg_wm_base = Wayland_protocols.Xdg_shell_client.Xdg_wm_base
 module Xdg_surface = Wayland_protocols.Xdg_shell_client.Xdg_surface
 module Xdg_toplevel = Wayland_protocols.Xdg_shell_client.Xdg_toplevel
@@ -33,6 +34,7 @@ type unpaired = {
 
 type paired = {
   window : X11.Window.t;
+  unmap : unit -> unit;
   xdg_surface : [`V1] Xdg_surface.t;
   mutable xdg_role : [
     | `Toplevel of [`V1] Xdg_toplevel.t
@@ -50,7 +52,7 @@ let paired_of_surface s =
   | X11 x -> Some x
   | _ -> None
 
-let pp_paired f { window; xdg_surface; xdg_role; geometry; override_redirect } =
+let pp_paired f { window; unmap = _; xdg_surface; xdg_role; geometry; override_redirect } =
   Fmt.pf f "%a@%a/%t=%a%s"
     Proxy.pp xdg_surface
     X11.Geometry.pp geometry
@@ -664,12 +666,19 @@ let pair t ~set_configured ~host_surface window =
             if Proxy.can_send proxy then Xdg_surface.ack_configure proxy ~serial;
             set_configured (
               match info.geometry with
-              | { width = 1; height = 1; _ } when info.win_attrs.override_redirect -> `Hide 
+              | { width = 1; height = 1; _ } when info.win_attrs.override_redirect -> `Hide
               | _ -> `Show
             )
         end in
+      let unmap () =
+        if Wayland.Proxy.can_send host_surface then (
+          Wl_surface.attach host_surface ~buffer:None ~x:0l ~y:0l;
+          Wl_surface.commit host_surface
+        )
+      in
       let paired = {
         window;
+        unmap;
         xdg_surface;
         geometry = info.geometry;
         xdg_role = `None;
@@ -917,6 +926,9 @@ let listen_x11 ~selection t =
       (* Put new windows at the bottom of the stack so they don't interfere with the active window *)
       X11.Window.configure x11 window ~stack_mode:`Below;
       X11.Window.map x11 window
+
+    method unmap_notify ~window =
+      Hashtbl.find_opt t.paired window |> Option.iter (fun p -> p.unmap ())
 
     method configure_request ~window ~width ~height =
       match Hashtbl.find_opt t.paired window with

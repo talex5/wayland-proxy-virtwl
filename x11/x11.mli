@@ -288,6 +288,8 @@ module Event : sig
   type handler = <
     map_request : window:Window.t -> unit;
 
+    unmap_notify : window:Window.t -> unit;
+
     configure_request :
       window:Window.t -> width:int -> height:int -> unit;
 
