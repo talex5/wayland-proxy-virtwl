@@ -943,6 +943,32 @@ let make_kde_decoration_manager bind c =
       make_kde_decoration ~host_decoration:(H.Org_kde_kwin_server_decoration_manager.create h ~surface) decoration
   end
 
+let make_xdg_decoration ~host_decoration c =
+  let h = host_decoration @@ object
+      inherit [_] H.Zxdg_toplevel_decoration_v1.v1
+      method on_configure _ = C.Zxdg_toplevel_decoration_v1.configure c
+    end
+  in
+  Proxy.Handler.attach c @@ object
+    inherit [_] C.Zxdg_toplevel_decoration_v1.v1
+    method on_destroy = delete_with H.Zxdg_toplevel_decoration_v1.destroy h
+    method on_set_mode _ = H.Zxdg_toplevel_decoration_v1.set_mode h
+    method on_unset_mode _ = H.Zxdg_toplevel_decoration_v1.unset_mode h
+  end
+
+let make_xdg_decoration_manager bind c =
+  let h = bind @@ object
+      inherit [_] H.Zxdg_decoration_manager_v1.v1
+    end
+  in
+  Proxy.Handler.attach c @@ object
+    inherit [_] C.Zxdg_decoration_manager_v1.v1
+    method on_destroy = delete_with H.Zxdg_decoration_manager_v1.destroy h
+    method on_get_toplevel_decoration _ decoration ~toplevel =
+      let toplevel = to_host toplevel in
+      make_xdg_decoration ~host_decoration:(H.Zxdg_decoration_manager_v1.get_toplevel_decoration h ~toplevel) decoration
+  end
+
 let make_data_offer ~client_offer h =
   let c = client_offer @@ object
       inherit [_] C.Wl_data_offer.v1
@@ -1201,6 +1227,7 @@ let registry =
     (module Wl_seat); (* Must come after primary selection device, or evince crashes *)
     (module Wl_output);
     (module Org_kde_kwin_server_decoration_manager);
+    (module Zxdg_decoration_manager_v1);
   ]
 
 let make_registry ~xwayland t reg =
@@ -1254,6 +1281,7 @@ let make_registry ~xwayland t reg =
       | Xdg_wm_base.T -> make_xdg_wm_base ~xwayland ~tag:t.config.tag bind proxy
       | Zxdg_output_manager_v1.T -> make_zxdg_output_manager_v1 ~xwayland bind proxy
       | Org_kde_kwin_server_decoration_manager.T -> make_kde_decoration_manager bind proxy
+      | Zxdg_decoration_manager_v1.T -> make_xdg_decoration_manager bind proxy
       | _ -> Fmt.failwith "Invalid service name for %a" Proxy.pp proxy
   end;
   registry |> Array.iteri (fun name (_, entry) ->
