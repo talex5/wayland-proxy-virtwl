@@ -4,4 +4,4 @@
   (preprocess (pps ppx_cstruct))
   (libraries wayland wayland.protocols virtio_gpu cmdliner fmt x11 eio_main))
 
-(vendored_dirs ocaml-wayland)
+(vendored_dirs eio ocaml-wayland)

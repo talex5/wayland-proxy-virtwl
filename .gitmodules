@@ -1,0 +1,6 @@
+[submodule "ocaml-wayland"]
+	path = ocaml-wayland
+	url = https://github.com/talex5/ocaml-wayland.git
+[submodule "eio"]
+	path = eio
+	url = https://github.com/ocaml-multicore/eio.git
