@@ -51,6 +51,7 @@ let send_checked (t:Types.display) ~major ?minor size fn =
 (* todo: if we send enough messages that don't expect a reply in a row, the
    sequence number would wrap. So in theory we should force a sync here. *)
 let send_only (t:Types.display) ~major ?minor size fn =
+  let bt = Printexc.get_callstack 20 in
   let r = send_aux t ~major ?minor size fn in
   Fiber.fork ~sw:t.sw
     (fun () ->
@@ -59,7 +60,8 @@ let send_only (t:Types.display) ~major ?minor size fn =
        | `No_reply -> ()
        | `Error msg ->
          Log.warn (fun f -> f "@[<v2>ERROR from X server: %a (last-sent=%d)@]" Error.pp msg
-                      (t.next_seq - 1))
+                      (t.next_seq - 1));
+         Printexc.print_raw_backtrace stderr bt;
     )
 
 let send_maybe_checked (type a) (checked : a checked) t ~major ?minor size fn : a =
