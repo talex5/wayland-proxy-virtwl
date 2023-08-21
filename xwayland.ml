@@ -17,6 +17,10 @@ module Xdg_positioner = Wayland_protocols.Xdg_shell_client.Xdg_positioner
 module Xdg_decor_mgr = Wayland_protocols.Xdg_decoration_unstable_v1_client.Zxdg_decoration_manager_v1
 module Xdg_decoration = Wayland_protocols.Xdg_decoration_unstable_v1_client.Zxdg_toplevel_decoration_v1
 
+let or_log label = function
+  | Ok () -> ()
+  | Error x11 -> Log.warn (fun f -> f "%s: configure failed: %a" label X11.Error.pp_code x11)
+
 type host_surface = [`V1 | `V2 | `V3 | `V4 | `V5] Wayland.Wayland_client.Wl_surface.t
 type client_surface = [`V1 | `V2 | `V3 | `V4 | `V5] Wayland.Wayland_server.Wl_surface.t
 
@@ -570,7 +574,8 @@ let init_toplevel t ~x11 ~xdg_surface ~info ~paired window =
           Fiber.fork ~sw:t.sw (fun () ->
               let (width, height) = scale_to_client t (width, height) in
               (paired:paired).geometry <- { paired.geometry with width; height };
-              X11.Window.configure x11 window ~width ~height ~border_width:0
+              X11.Window.configure_checked x11 window ~width ~height ~border_width:0
+              |> or_log "on_configure"
             )
         )
 
@@ -637,7 +642,8 @@ let init_popup t ~x11 ~xdg_surface ~info ~parent ~paired window =
           let (width, height) = scale_to_client t (width, height) in
           Fiber.fork ~sw:t.sw (fun () ->
               (paired:paired).geometry <- { paired.geometry with width; height };
-              X11.Window.configure x11 window ~width ~height ~border_width:0
+              X11.Window.configure_checked x11 window ~width ~height ~border_width:0
+              |> or_log "on_configure(popup)"
             )
         )
       method on_popup_done _ = ()               (* todo: maybe notify the X application about this? *)
@@ -938,7 +944,10 @@ let listen_x11 ~selection t =
         (* In theory, we must ensure the size is a multiple of the scale factor, as the Wayland spec requires this.
            However, this makes some windows look ugly, and Sway seems to allow any size. *)
         (* let (width, height) = scale_to_host t (width, height) |> scale_to_client t in *)
-        X11.Window.configure x11 window ~width ~height ~border_width:0
+        Fiber.fork ~sw:t.sw (fun () ->
+          X11.Window.configure_checked x11 window ~width ~height ~border_width:0
+          |> or_log "configure_request"
+        )
         (* todo: send a synthetic ConfigureNotify event if nothing changed *)
       | Some p ->
         (* For now, don't allow apps to change their own size once mapped. *)
