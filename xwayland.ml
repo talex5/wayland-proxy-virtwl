@@ -681,8 +681,10 @@ let pair t ~set_configured ~host_surface window =
             )
         end in
       let unmap () =
-        Wl_surface.attach host_surface ~buffer:None ~x:0l ~y:0l;
-        Wl_surface.commit host_surface
+        if Wayland.Proxy.can_send host_surface then (
+          Wl_surface.attach host_surface ~buffer:None ~x:0l ~y:0l;
+          Wl_surface.commit host_surface
+        )
       in
       let paired = {
         window;
