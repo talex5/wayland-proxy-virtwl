@@ -6,7 +6,7 @@ authors: ["talex5@gmail.com"]
 homepage: "https://github.com/talex5/wayland-proxy-virtwl"
 bug-reports: "https://github.com/talex5/wayland-proxy-virtwl/issues"
 depends: [
-  "dune" {>= "2.8"}
+  "dune" {>= "3.11"}
   "logs" {>= "0.7.0"}
   "cmdliner" {>= "1.1.0"}
   "cstruct" {>= "6.0.0"}
@@ -15,7 +15,7 @@ depends: [
   "ocaml" {>= "5.0.0"}
   "fmt" {>= "0.8.9"}
   "conf-pkg-config"
-  "wayland" {>= "1.1"}
+  "wayland" {>= "1.1" & < "2.0"}
   "odoc" {with-doc}
 ]
 build: [

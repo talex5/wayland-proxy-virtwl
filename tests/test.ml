@@ -11,7 +11,7 @@ type t = {
   linux_dmabuf : (Virtio_gpu.Wayland_dmabuf.t * Virtio_gpu.Wayland_dmabuf.fmt) option;
   surface : [`V4] Wl_surface.t;
   gpu : Virtio_gpu.t;
-  mutable fg : int32;
+  fg : int32;
   mutable width : int;
   mutable height : int;
   mutable scroll : int;
