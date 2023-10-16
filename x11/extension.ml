@@ -1,6 +1,3 @@
-open Lwt.Syntax
-open Lwt.Infix
-
 type info = {
   major_opcode : int;
 }
@@ -30,7 +27,7 @@ module Query = struct
   let send t name =
     Log.info (fun f -> f "QueryExtension %S" name);
     let len = sizeof_request + (Wire.round_up4 (String.length name)) in
-    let+ r = Request.send_exn t ~major:98 len (fun r ->
+    let r = Request.send_exn t ~major:98 len (fun r ->
         set_request_name_len r (String.length name);
         Cstruct.blit_from_string name 0 r sizeof_request (String.length name)
       )
@@ -45,6 +42,6 @@ end
 let query = Query.send
 
 let query_exn t name =
-  query t name >|= function
+  match query t name with
   | None -> Fmt.failwith "Extension %S not present" name
   | Some x -> x

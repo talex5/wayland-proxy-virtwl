@@ -1,8 +1,9 @@
-open Lwt.Syntax
+module Read = Eio.Buf_read
 
 let read_exactly n x =
-  let resp = Cstruct.create n in
-  let+ () = Lwt_io.read_into_exactly_bigstring x resp.buffer resp.off resp.len in
+  Read.ensure x n;
+  let resp = Cstruct.sub_copy (Read.peek x) 0 n in
+  Read.consume x n;
   resp
 
 let round_up4 x = (x + 3) land -4

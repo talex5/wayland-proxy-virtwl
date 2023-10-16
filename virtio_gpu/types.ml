@@ -159,13 +159,14 @@ end
 module Cross_domain_read_write = struct
   type t = [`Read_write] to_host
 
-  let create ~id buf ~len =
+  let create ~id buf =
+    let len = Cstruct.length buf in
     let size = 16 + len in
     Cross_domain_header.create `WRITE size @@ fun body ->
     NE.set_uint32 body 0 id;
     NE.set_uint32 body 4 (if len = 0 then 1l else 0l);
     NE.set_uint32 body 8 (Int32.of_int len);
-    Cstruct.blit_from_bytes buf 0 body 16 len;
+    Cstruct.blit buf 0 body 16 len;
     ()
 
   let parse ring fn =
@@ -274,4 +275,12 @@ module Wayland_ring = struct
     | 5l -> Cross_domain_send_recv.parse t recv
     | 6l -> Cross_domain_read_write.parse t read_pipe
     | x -> Fmt.failwith "Unknown virtio_gpu event code %ld!" x
+end
+
+module Event = struct
+  let v_FENCE_SIGNALED = 0x90000000l
+
+  let check t =
+    assert (NE.get_uint32 t 0 = v_FENCE_SIGNALED);
+    assert (NE.get_uint32 t 4 = 8l);
 end
