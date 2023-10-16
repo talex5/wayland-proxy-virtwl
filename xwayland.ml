@@ -129,7 +129,7 @@ module Selection = struct
   type notify_key = {
     selection : X11.Atom.t;
     target : X11.Atom.t;
-  }
+  } [@@warning "-69"]
 
   type t = {
     x11 : X11.Display.t Lwt.t;

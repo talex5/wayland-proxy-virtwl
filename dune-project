@@ -1,4 +1,4 @@
-(lang dune 2.8)
+(lang dune 3.11)
 (name wayland-proxy-virtwl)
 (formatting disabled)
 (generate_opam_files true)
@@ -17,4 +17,4 @@
    (ocaml (>= 5.0.0))
    (fmt (>= 0.8.9))
    conf-pkg-config
-   (wayland (>= 1.1))))
+   (wayland (and (>= 1.1) (< 2.0)))))
