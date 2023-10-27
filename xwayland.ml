@@ -512,9 +512,12 @@ type window_info = {
 (* Collect information about a new window we've been asked to manage. *)
 let examine_window t window : window_info =
   let x11 = Promise.await_exn t.x11 in
-  let title =
-    let wm_name = intern t "WM_NAME" in
-    X11.Property.get_string x11 window wm_name |> Option.value ~default:"<untitled>"
+  let wm_name =
+    let atom = intern t "WM_NAME" in
+    X11.Property.get_string x11 window atom
+  and net_wm_name =
+    let atom = intern t "_NET_WM_NAME" in
+    X11.Property.get_string x11 window atom
   and window_type =
     let net_wm_window_type = intern t "_NET_WM_WINDOW_TYPE" in
     X11.Property.get_atoms x11 window net_wm_window_type
@@ -544,6 +547,10 @@ let examine_window t window : window_info =
       | _ :: tys -> aux tys
     in
     if window_type = [] && not win_attrs.override_redirect then `Normal else aux window_type
+  and title = match wm_name, net_wm_name with
+    | _, Some title -> title
+    | Some title, _ -> title
+    | _ -> "<untitled>"
   in
   {
     title;
@@ -951,11 +958,13 @@ let listen_x11 ~selection t =
       Log.info (fun f -> f "PropertyNotify: %a/%a %s" X11.Window.pp window (X11.Atom.pp x11) atom
                    (match state with `NewValue -> "has new value" | `Deleted -> "deleted"));
       Fiber.fork ~sw:t.sw (fun () ->
-          let wm_name = intern t "WM_NAME" in
-          if atom = wm_name then (
+          let wm_name = intern t "WM_NAME"
+          and net_wm_name = intern t "_NET_WM_NAME" in
+          let has_property p = X11.Property.get_string x11 window p <> None in
+          if atom = net_wm_name || (atom = wm_name && not (has_property net_wm_name)) then (
             match Hashtbl.find_opt t.paired window with
             | Some { xdg_role = `Toplevel toplevel; _ } ->
-              let title = X11.Property.get_string x11 window wm_name |> Option.value ~default:"<untitled>" in
+              let title = X11.Property.get_string x11 window atom |> Option.value ~default:"<untitled>" in
               if Proxy.can_send toplevel then
                 Xdg_toplevel.set_title toplevel ~title:(t.config.tag ^ title)
             | _ -> ()
