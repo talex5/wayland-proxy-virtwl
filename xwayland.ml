@@ -960,10 +960,11 @@ let listen_x11 ~selection t =
       Fiber.fork ~sw:t.sw (fun () ->
           let wm_name = intern t "WM_NAME"
           and net_wm_name = intern t "_NET_WM_NAME" in
-          if atom = wm_name || atom = net_wm_name then (
+          let has_property p = X11.Property.get_string x11 window p <> None in
+          if atom = net_wm_name || (atom = wm_name && not (has_property net_wm_name)) then (
             match Hashtbl.find_opt t.paired window with
             | Some { xdg_role = `Toplevel toplevel; _ } ->
-              let title = X11.Property.get_string x11 window wm_name |> Option.value ~default:"<untitled>" in
+              let title = X11.Property.get_string x11 window atom |> Option.value ~default:"<untitled>" in
               if Proxy.can_send toplevel then
                 Xdg_toplevel.set_title toplevel ~title:(t.config.tag ^ title)
             | _ -> ()
