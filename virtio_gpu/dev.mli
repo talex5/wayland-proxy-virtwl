@@ -2,8 +2,7 @@
 
 open Eio.Std
 
-type 'a t
-  constraint 'a = [< `Wayland | `Alloc ]
+type t
 
 type query = {
   width : int32;
@@ -19,24 +18,21 @@ type image = {
   stride : int32;
 }
 
-val of_fd : sw:Switch.t -> Eio_unix.Fd.t -> 'a t option
+val of_fd : sw:Switch.t -> Eio_unix.Fd.t -> t option
 (** [of_fd ~sw x] checks that [x] is a virtio-gpu device and
-    initialises it. Returns [None] if it's not a virtio-device.
-    The result can be used either as a Wayland channel or
-    for allocating host buffers, but not both (due to a race in the protocol).
-    If you need to do both, open the device file twice and call this on both FDs. *)
+    initialises it. Returns [None] if it's not a virtio-device. *)
 
-val alloc : [`Alloc] t -> query -> image
+val alloc : t -> query -> image
 (** [alloc t query] allocates a buffer matching [query] on the host and returns a handle to it.
     Use {!Utils.safe_map_file} to map it. *)
 
-val poll : [`Wayland] t -> unit
+val poll : t -> unit
 (** [poll t] indicates that we are ready for the host to write the next event to the shared page. *)
 
-val send : [`Wayland] t -> Cstruct.t -> Unix.file_descr list -> unit
+val send : t -> Cstruct.t -> Unix.file_descr list -> unit
 (** [send t msg fds] sends a Wayland message to the host. *)
 
-val handle_event : sw:Switch.t -> [`Wayland] t -> Cstruct.t -> [
+val handle_event : sw:Switch.t -> t -> Cstruct.t -> [
     | `Recv of Cstruct.t * Eio_unix.Fd.t list  (** Note: data is a view onto the ring *)
     | `Again
   ]
@@ -44,8 +40,8 @@ val handle_event : sw:Switch.t -> [`Wayland] t -> Cstruct.t -> [
     [buf] is expected to be an 8-byte message saying to look in the shared page.
     Any FDs returned will be attached to [sw]. *)
 
-val close : _ t -> unit
+val close : t -> unit
 (** [close t] closes the underlying FD. *)
 
-val is_closed : _ t -> bool
+val is_closed : t -> bool
 (** [is_closed t] is [true] after [close t] has been called. *)

@@ -25,16 +25,22 @@ type image = {
   stride : int32;
 }
 
-type 'a t = {
+type ring = {
+  id : Res_handle.t;
+  handle : gem_handle;
+  data : Cstruct.t;
+}
+
+type t = {
   sw : Switch.t;
   fd : Eio_unix.Fd.t;
-  ring_handle : gem_handle;
-  unmap_ring : unit Lazy.t;     (* Force to close [fd] and unmap ring. *)
-  ring : Cstruct.t;     (* Invalid if [is_closed] *)
+  query_ring : ring;            (* Invalid if [is_closed] *)
+  channel_ring : ring;          (* Invalid if [is_closed] *)
+  unmap_rings : unit Lazy.t;    (* Force to close [fd] and unmap rings. *)
   mutable pipe_of_id : pipe Res_handle.Map.t;
-  mutable last_resource_id : Res_handle.t;
+  mutable last_pipe_id : Res_handle.t;
   alloc_cache : (query, image_template) Hashtbl.t;
-} constraint 'a = [< `Wayland | `Alloc ]
+}
 
 let is_closed t =
   Eio_unix.Fd.use t.fd (Fun.const false) ~if_closed:(Fun.const true)
@@ -81,7 +87,7 @@ let init_context t items =
 let poll t =
   let dev = get_dev t in
   Eio_unix.Fd.use_exn "poll" dev @@ fun dev ->
-  drm_exec_buffer dev Cross_domain_poll.v ~ring:`Channel ~handles:[| t.ring_handle |]
+  drm_exec_buffer dev Cross_domain_poll.v ~ring:`Channel ~handles:[| t.channel_ring.handle |]
 
 let check_caps fd =
   let caps = Capabilities.create_buffer () in
@@ -99,6 +105,14 @@ let check_caps fd =
                 supports_external_gpu_memory
             )
 
+let create_ring unix_fd =
+  (* Set up shared ring *)
+  let handle, id = create_blob unix_fd ~size:(Int64.of_int page_size) `Guest ~mappable:true ~shareable:false in
+  (* Map it into our address space *)
+  let offset = drm_map unix_fd handle in
+  let data = Utils.safe_map_file unix_fd ~pos:offset ~len:page_size ~host_size:page_size ~kind:Bigarray.char in
+  { id; handle; data = Cstruct.of_bigarray data }
+
 let of_fd ~sw fd =
   Eio_unix.Fd.use_exn "of_fd" fd @@ fun unix_fd ->
   let version = drm_get_version unix_fd in
@@ -111,27 +125,32 @@ let of_fd ~sw fd =
       `Num_rings 2;
       `Poll_rings_mask [`Channel];
     ];
-    (* Set up shared ring *)
-    let ring_handle, ring_id = create_blob unix_fd ~size:(Int64.of_int page_size) `Guest ~mappable:true ~shareable:false in
-    (* Map it into our address space *)
-    let offset = drm_map unix_fd ring_handle in
-    let ring = Utils.safe_map_file unix_fd ~pos:offset ~len:page_size ~host_size:page_size ~kind:Bigarray.char in
-    let unmap_ring = lazy (
+    let query_ring = create_ring unix_fd in
+    let channel_ring = create_ring unix_fd in
+    let unmap_rings = lazy (
       Log.info (fun f -> f "Closing %a and unmapping device" Eio_unix.Fd.pp fd);
       let closed = Eio_unix.Fd.use fd (Fun.const false) ~if_closed:(Fun.const true) in
       if not closed then Eio_unix.Fd.close fd;  (* Prevents further ring use *)
-      Utils.unmap (Bigarray.genarray_of_array1 ring)
+      Utils.unmap (Bigarray.genarray_of_array1 query_ring.data.buffer);
+      Utils.unmap (Bigarray.genarray_of_array1 channel_ring.data.buffer)
     ) in
-    Switch.on_release sw (fun () -> Lazy.force unmap_ring);
+    Switch.on_release sw (fun () -> Lazy.force unmap_rings);
     (* Tell Linux to use it for Wayland *)
-    let init = Cross_domain_init.create ~ring:ring_id ~channel_type:`Wayland in
+    let init =
+      Cross_domain_init.create
+        ~channel_type:`Wayland
+        ~query_ring:query_ring.id
+        ~channel_ring:channel_ring.id
+    in
     drm_exec_buffer unix_fd init;
     Some {
       sw;
       fd;
-      ring_handle; ring = Cstruct.of_bigarray ring; unmap_ring;
+      query_ring;
+      channel_ring;
+      unmap_rings;
       pipe_of_id = Res_handle.Map.empty;
-      last_resource_id = Res_handle.init;
+      last_pipe_id = Res_handle.pipe_read_start;
       alloc_cache = Hashtbl.create 100;
     }
   )
@@ -151,9 +170,9 @@ let query_image t query =
     in
     let dev = get_dev t in
     Eio_unix.Fd.use_exn "query_image" dev @@ fun dev ->
-    drm_exec_buffer dev cs ~ring:`Query ~handles:[| t.ring_handle |];
-    drm_wait dev t.ring_handle;
-    Cross_domain_image_requirements.parse t.ring @@ fun ~stride0 ~offset0 ~host_size ~blob_id ->
+    drm_exec_buffer dev cs ~ring:`Query ~handles:[| t.query_ring.handle |];
+    drm_wait dev t.query_ring.handle;
+    Cross_domain_image_requirements.parse t.query_ring.data @@ fun ~stride0 ~offset0 ~host_size ~blob_id ->
     let cached = { host_size; template_id = blob_id; stride0; offset0 } in
     Hashtbl.add t.alloc_cache query cached;
     cached
@@ -179,9 +198,9 @@ let create_send t data fds =
       (* Send a pipe *)
       let fd = Unix.dup ~cloexec:true fd in
       let pipe = (Eio_unix.Net.import_socket_stream ~sw:t.sw ~close_unix:true fd :> Eio_unix.sink_ty r) in
-      let id = Res_handle.next t.last_resource_id in
+      let id = Res_handle.next_pipe_id t.last_pipe_id in
       t.pipe_of_id <- Res_handle.Map.add id pipe t.pipe_of_id;
-      t.last_resource_id <- id;
+      t.last_pipe_id <- id;
       (id, `Read_pipe)          (* We read; the host writes *)
     | _ ->
       (* Send a buffer *)
@@ -243,10 +262,6 @@ module Recv = struct
     let rec to_fds acc = function
       | [] -> List.rev acc
       | (id, ty, size) :: ids ->
-        (* There is a race in the protocol: when sending, we have to guess correctly
-           what the current ID is, but the host updates it asynchronously. Here we
-           try to get back in sync. *)
-        t.last_resource_id <- id;
         match
           match ty with
           | `Blob -> make_blob_fd ~sw t ~id ~size
@@ -276,9 +291,9 @@ let handle_event ~sw t buf =
   let got = Cstruct.length buf in
   if got < 8 then Fmt.failwith "Expected to read an 8-byte drm_event (got %d bytes)" got;
   Types.Event.check buf;
-  Wayland_ring.parse t.ring
+  Wayland_ring.parse t.channel_ring.data
     ~recv:(fun data ids -> `Recv (Recv.wayland ~sw t data ids))
     ~read_pipe:(fun ~id ~hang_up data -> Recv.pipe_host_to_guest t ~id ~hang_up data; `Again)
 
 let close t =
-  Lazy.force t.unmap_ring
+  Lazy.force t.unmap_rings

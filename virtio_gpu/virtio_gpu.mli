@@ -12,10 +12,9 @@ val default_dri_dir : 'a Eio.Path.t -> 'a Eio.Path.t
 val find_device : sw:Eio.Switch.t -> _ Eio.Path.t -> (t, [> `Msg of string]) result
 (** [find_device ~sw dri_dir] searches for a virtio-gpu device in [dri_dir] (see {!default_dri_dir}). *)
 
-val connect_wayland : sw:Eio.Switch.t -> t -> transport
-(** [connect_wayland t] creates a new Wayland transport from [t]. *)
-
 val close : t -> unit
+
+val wayland_transport : t -> transport
 
 val alloc : t -> Dev.query -> Dev.image
 (** [alloc t query] allocates a buffer matching [query] on the host and returns a handle to it.

@@ -140,7 +140,7 @@ let () =
   Switch.run @@ fun sw ->
   let dri_dir = Virtio_gpu.default_dri_dir env#fs in
   let gpu = Virtio_gpu.find_device ~sw dri_dir |> or_die in
-  let transport = Virtio_gpu.connect_wayland ~sw gpu in
+  let transport = Virtio_gpu.wayland_transport gpu in
   let display = Wayland.Client.connect ~sw transport in
   let r = Wayland.Registry.of_display display in
   let comp = Wayland.Registry.bind r @@ new Wl_compositor.v4 in

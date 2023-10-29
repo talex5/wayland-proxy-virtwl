@@ -15,17 +15,11 @@ module Res_handle : sig
 
   module Map : Map.S with type key = t
 
-  (** {2 Guessing}
+  val pipe_read_start : t
+  (** Read pipe IDs start at this value *)
 
-      The protocol requires us to guess what number the host will assign next.
-      Is it not possible to do this reliably (since it can update at any time),
-      but we do our best. *)
-
-  val init : t
-  (** The initial value of the host's resource counter. *)
-
-  val next : t -> t
-  (** The value of the host's counter after increasing it. *)
+  val next_pipe_id : t -> t
+  (** The next value of the pipe ID counter. *)
 end
 
 module Capabilities : sig
@@ -74,8 +68,12 @@ end
 module Cross_domain_init : sig
   type t = [`Init] to_host
 
-  val create : ring:Res_handle.t -> channel_type:[< `Camera | `Wayland ] -> t
-  (** [create ~ring ~channel_type] asks the host to use [ring] for the [channel_type] protocol. *)
+  val create :
+    query_ring:Res_handle.t ->
+    channel_ring:Res_handle.t ->
+    channel_type:[< `Camera | `Wayland ] -> t
+  (** [create ~query_ring ~channel_ring ~channel_type] asks the host
+      to use [query_ring] and [channel_ring] for the [channel_type] protocol. *)
 end
 
 module Cross_domain_poll : sig

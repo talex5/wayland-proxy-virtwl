@@ -51,28 +51,21 @@ let main ~env setup_tracing use_virtio_gpu wayland_display x_display config args
   let proc_mgr = env#process_mgr in
   let net = env#net in
   Switch.run @@ fun sw ->
-  let virtio_gpu =
+  setup_tracing ~wayland_display;
+  let connect_host ~sw =
     if use_virtio_gpu then (
       let dri_dir = Virtio_gpu.default_dri_dir env#fs in
       match Virtio_gpu.find_device ~sw dri_dir with
-      | Ok x -> Some x
+      | Ok virtio_gpu ->
+        let transport = Virtio_gpu.wayland_transport virtio_gpu in
+        Host.connect ~virtio_gpu ~sw transport
       | Error (`Msg m) ->
         Fmt.epr "No virtio-gpu device: %s@." m;
         exit 1
-    ) else None
-  in
-  setup_tracing ~wayland_display;
-  let connect_host ~sw =
-    let transport =
-      match virtio_gpu with
-      | Some virtio_gpu ->
-        let transport = Virtio_gpu.connect_wayland ~sw virtio_gpu in
-        (transport :> Wayland.S.transport)
-      | None ->
-        let transport = Wayland.Unix_transport.connect ~sw ~net () in
-        (transport :> Wayland.S.transport)
-    in
-    Host.connect ?virtio_gpu ~sw transport
+    ) else (
+      let transport = Wayland.Unix_transport.connect ~sw ~net () in
+      Host.connect ~sw transport
+    )
   in
   (* Listen for incoming Wayland client connections: *)
   match listen_wayland ~sw ~net ~config ~connect_host wayland_display with

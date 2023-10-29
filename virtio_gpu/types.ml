@@ -18,8 +18,11 @@ module Res_handle = struct
 
   module Map = Map.Make(Int32)
 
-  let init = 1l
-  let next = Int32.add 2l
+  let pipe_read_start = 0x80000000l
+
+  let next_pipe_id x =
+    let x = Int32.succ x in
+    if x = 0l then pipe_read_start else x
 end
 
 module Capabilities = struct
@@ -147,10 +150,11 @@ end
 module Cross_domain_init = struct
   type t = [`Init] to_host
 
-  let create ~ring ~channel_type =
-    Cross_domain_header.create `INIT 8 @@ fun body ->
-    NE.set_uint32 body 0 ring;
-    NE.set_uint32 body 4 (match channel_type with
+  let create ~query_ring ~channel_ring ~channel_type =
+    Cross_domain_header.create `INIT 12 @@ fun body ->
+    NE.set_uint32 body 0 query_ring;
+    NE.set_uint32 body 4 channel_ring;
+    NE.set_uint32 body 8 (match channel_type with
         | `Wayland -> 0x0001l
         | `Camera  -> 0x0002l
       )
