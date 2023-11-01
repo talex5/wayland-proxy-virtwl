@@ -25,9 +25,10 @@ Do `DRM_IOCTL_VIRTGPU_CONTEXT_INIT` to create a cross-domain context.
 Sommelier sets `VIRTGPU_CONTEXT_PARAM_NUM_RINGS = 2`
 and `VIRTGPU_CONTEXT_PARAM_POLL_RINGS_MASK = 1 << CROSS_DOMAIN_CHANNEL_RING`.
 
-Use `DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB` to allocate one page of memory shared with the host
-(`VIRTGPU_BLOB_MEM_GUEST` with `VIRTGPU_BLOB_FLAG_USE_MAPPABLE`).
-This gets you a gem handle in a field called `bo_handle` (I don't know what `bo` stands for).
+Use `DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB` to allocate two pages of memory shared with the host
+(each `VIRTGPU_BLOB_MEM_GUEST` with `VIRTGPU_BLOB_FLAG_USE_MAPPABLE`).
+One ("channel") is for Wayland data and the other ("query") is used when allocating surfaces.
+This gets you gem handles in a field called `bo_handle` (I don't know what `bo` stands for).
 
 The [GEM documentation](https://lwn.net/Articles/283798/) (an out-of-date mailing list post),
 explains that gem handles are "for all intents and purposes, equivalent to file descriptors".
@@ -41,9 +42,9 @@ The `mmap` system described in the documentation seems to be obsolete.
 Instead, use `DRM_IOCTL_GEM_MMAP` to get a "fake offset" and then perform an `mmap` on the device file,
 quoting that offset to map the gem handle instead.
 
-Finally, send a `CROSS_DOMAIN_CMD_INIT` command to the host to tell it about the memory page.
-Everything refers to this page as a "ring", but it doesn't seem to be used as a ring.
-The host just writes stuff to the start of it when it wants to tell the guest something.
+Finally, send a `CROSS_DOMAIN_CMD_INIT` command to the host to tell it about the memory pages.
+Everything refers to the pages as "rings", but they doesn't seem to be used as rings.
+The host just writes stuff to the start of a page when it wants to tell the guest something.
 
 ### Sending data
 
@@ -97,21 +98,6 @@ To receive a pipe from the host:
 
 To send a pipe to the host:
 
-1. Send a Wayland message, quoting the new pipe's resource ID (see **Problems** below).
+1. Send a Wayland message, quoting the new pipe's resource ID (or does crosvm just ignore the ID field?).
+   Pipe IDs start at 0x80000001 and increment each time you request a new one.
 2. When data is available, you will read an event from the device FD. The shared page contains the data.
-
-### Problems
-
-The system appears to have a number of flaws:
-
-- `CROSS_DOMAIN_CMD_GET_IMAGE_REQUIREMENTS` writes to the shared ring immediately,
-  and thus races with any Wayland data being written to it.
-  To avoid this, I open the device file twice, using one for images and the other for Wayland protocol data.
-
-- When sending a pipe, the guest has to know what ID the host will assign to it.
-  The guest guesses, by adding 2 to the last ID it knows about, and the host checks its guess.
-  If it was wrong (e.g. because the host created a new ID at the same time) then you get a protocol error.
-
-- crosvm's `CrossDomainWorker` handles all pending events on each poll, so if
-  Wayland data and pipe data are available at the same time, one event gets overwritten.
-  Reported at: https://issuetracker.google.com/issues/259268477

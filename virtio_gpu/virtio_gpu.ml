@@ -6,8 +6,8 @@ module Utils = Utils
 type transport = < Wayland.S.transport; close : unit >
 
 type t = {
-  device_path : Eio.Fs.dir_ty Eio.Path.t;
-  alloc : [`Alloc] Dev.t;
+  dev : Dev.t;
+  transport : transport;
   mutable have_dmabuf : bool option;    (* None if we haven't checked yet *)
 }
 
@@ -104,21 +104,17 @@ let find_device ~sw dri_dir =
     let conn = Eio.Path.open_out ~sw ~create:`Never device_path in
     match Dev.of_fd ~sw (Eio_unix.Resource.fd_opt conn |> Option.get) with
     | None -> Eio.Flow.close conn; None
-    | Some alloc -> Some { device_path; alloc; have_dmabuf = None }
+    | Some dev ->
+      let transport = wayland_transport dev conn in
+      Some { dev; transport; have_dmabuf = None }
   in
   find_device_gen ~dri_dir init
 
-let close t = Dev.close t.alloc
+let close t = Dev.close t.dev
 
-let alloc t = Dev.alloc t.alloc
+let alloc t = Dev.alloc t.dev
 
-let connect_wayland ~sw t =
-  let dev = Eio.Path.open_out ~sw t.device_path ~create:`Never in
-  match Dev.of_fd ~sw (Eio_unix.Resource.fd_opt dev |> Option.get) with
-  | Some wayland -> wayland_transport wayland dev
-  | None ->
-    Eio.Flow.close dev;
-    Fmt.failwith "%a is no longer a virtio-gpu device!" Eio.Path.pp t.device_path
+let wayland_transport t = t.transport
 
 let with_memory_fd gpu ~width ~height f =
   let query = {
