@@ -2,26 +2,41 @@
   inputs = {
     nixpkgs.url = "nixpkgs";
     flake-utils.url = "github:numtide/flake-utils";
-    opam2nix = {
-      url = "github:talex5/opam2nix/flakes";
-      inputs.nixpkgs.follows = "nixpkgs";
-      inputs.flake-utils.follows = "flake-utils";
-    };
   };
 
-  outputs = { self, nixpkgs, flake-utils, opam2nix }:
+  outputs = { self, nixpkgs, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        selection =
-          opam2nix.packages.${system}.opam2nix.build {
-            ocaml = pkgs.ocaml-ng.ocamlPackages_5_0.ocaml;
-            selection = ./nix/opam-selection.nix;
-            src = ./.;
-          };
+        ocamlPackages = pkgs.ocaml-ng.ocamlPackages_5_0;
       in
       {
-        packages.default = selection.wayland-proxy-virtwl;
+        packages = {
+          proxy =
+            # Based on build rule in nixpkgs, by qyliss and sternenseemann
+            ocamlPackages.buildDunePackage rec {
+              pname = "wayland-proxy-virtwl";
+              version = "dev";
+
+              src = ./.;
+
+              nativeBuildInputs = [
+                pkgs.pkg-config
+              ];
+
+              buildInputs = [ pkgs.libdrm ] ++ (with ocamlPackages; [
+                dune-configurator
+                eio_main
+                ppx_cstruct
+                wayland
+                cmdliner
+                logs
+                ppx_cstruct
+              ]);
+            };
+
+          default = self.packages.${system}.proxy;
+        };
       }
     );
 }
