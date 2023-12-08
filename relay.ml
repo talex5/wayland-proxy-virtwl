@@ -122,18 +122,19 @@ module CD = struct
     mutable client_memory : Cstruct.t;
   }
 
-  type 'a t = 
-    | Region           : 'v H.Wl_region.t                       -> [`Wl_region]                       t
-    | Surface          : 'v surface                             -> [`Wl_surface]                      t
-    | Buffer           : 'v buffer                              -> [`Wl_buffer]                       t
-    | Seat             : 'v H.Wl_seat.t                         -> [`Wl_seat]                         t
-    | Output           : 'v H.Wl_output.t                       -> [`Wl_output]                       t
-    | Toplevel         : 'v H.Xdg_toplevel.t                    -> [`Xdg_toplevel]                    t
-    | Xdg_surface      : 'v H.Xdg_surface.t                     -> [`Xdg_surface]                     t
-    | Xdg_positioner   : 'v H.Xdg_positioner.t                  -> [`Xdg_positioner]                  t
-    | Data_source      : 'v H.Wl_data_source.t                  -> [`Wl_data_source]                  t
-    | Gtk_source       : 'v H.Zwp_primary_selection_source_v1.t -> [`Gtk_primary_selection_source]    t
-    | Zwp_source       : 'v H.Zwp_primary_selection_source_v1.t -> [`Zwp_primary_selection_source_v1] t
+  type 'a t =
+    | Region               : 'v H.Wl_region.t                       -> [`Wl_region]                       t
+    | Surface              : 'v surface                             -> [`Wl_surface]                      t
+    | Buffer               : 'v buffer                              -> [`Wl_buffer]                       t
+    | Seat                 : 'v H.Wl_seat.t                         -> [`Wl_seat]                         t
+    | Output               : 'v H.Wl_output.t                       -> [`Wl_output]                       t
+    | Toplevel             : 'v H.Xdg_toplevel.t                    -> [`Xdg_toplevel]                    t
+    | Xdg_surface          : 'v H.Xdg_surface.t                     -> [`Xdg_surface]                     t
+    | Xdg_positioner       : 'v H.Xdg_positioner.t                  -> [`Xdg_positioner]                  t
+    | Data_source          : 'v H.Wl_data_source.t                  -> [`Wl_data_source]                  t
+    | Gtk_source           : 'v H.Zwp_primary_selection_source_v1.t -> [`Gtk_primary_selection_source]    t
+    | Pointer              : 'v H.Wl_pointer.t                      -> [`Wl_pointer]                      t
+    | Zwp_source           : 'v H.Zwp_primary_selection_source_v1.t -> [`Zwp_primary_selection_source_v1] t
 end
 
 (* Note: the role here is our role: [`Server] data is attached to proxies to
@@ -181,6 +182,7 @@ let to_host (type a) (c : (a, 'v, [`Server]) Proxy.t) : (a, 'v, [`Client]) Proxy
   | Zwp_source x -> cv x
   | Buffer (`Virtwl x) -> cv (Lazy.force x).host_buffer
   | Buffer (`Direct x) -> cv x
+  | Pointer c -> cv c
   | Gtk_source _ ->
     (* Here, a client Gtk corresponds to a host Zwp, so the types aren't right. *)
     failwith "Can't use to_host with GTK translation"
@@ -668,8 +670,10 @@ let make_pointer t ~xwayland ~host_seat c =
       method on_axis_relative_direction _ = C.Wl_pointer.axis_relative_direction c
     end
   in
+  let user_data = client_data (CD.Pointer h) in
   Proxy.Handler.attach c @@ object
     inherit [_] C.Wl_pointer.v1
+    method! user_data = user_data
 
     method on_set_cursor _ ~serial ~surface ~hotspot_x ~hotspot_y =
       (* Cursors are not unscaled, so no need to transform here. *)
@@ -965,6 +969,29 @@ let make_xdg_decoration_manager bind c =
     method on_get_toplevel_decoration _ decoration ~toplevel =
       let toplevel = to_host toplevel in
       make_xdg_decoration ~host_decoration:(H.Zxdg_decoration_manager_v1.get_toplevel_decoration h ~toplevel) decoration
+end
+
+let make_relative_pointer ~host_relative_pointer c =
+  let h =
+    host_relative_pointer @@ object
+      inherit [_] H.Zwp_relative_pointer_v1.v1
+      method on_relative_motion _ = C.Zwp_relative_pointer_v1.relative_motion c
+    end
+  in
+  Proxy.Handler.attach c @@ object
+    inherit [_] C.Zwp_relative_pointer_v1.v1
+    method on_destroy = delete_with H.Zwp_relative_pointer_v1.destroy h
+  end
+
+let make_relative_pointer_manager bind proxy =
+  let proxy = Proxy.cast_version proxy in
+  let h = bind @@ new H.Zwp_relative_pointer_manager_v1.v1 in
+  Proxy.Handler.attach proxy @@ object
+    inherit [_] C.Zwp_relative_pointer_manager_v1.v1
+    method on_destroy = delete_with H.Zwp_relative_pointer_manager_v1.destroy h
+    method on_get_relative_pointer _ relative_pointer ~pointer =
+      let host_relative_pointer = H.Zwp_relative_pointer_manager_v1.get_relative_pointer h ~pointer:(to_host pointer) in
+      make_relative_pointer ~host_relative_pointer relative_pointer
   end
 
 let make_data_offer ~client_offer h =
@@ -1222,6 +1249,7 @@ let registry =
     (module Wl_output);
     (module Org_kde_kwin_server_decoration_manager);
     (module Zxdg_decoration_manager_v1);
+    (module Zwp_relative_pointer_manager_v1);
   ]
 
 let make_registry ~xwayland t reg =
@@ -1276,6 +1304,7 @@ let make_registry ~xwayland t reg =
       | Zxdg_output_manager_v1.T -> make_zxdg_output_manager_v1 ~xwayland bind proxy
       | Org_kde_kwin_server_decoration_manager.T -> make_kde_decoration_manager bind proxy
       | Zxdg_decoration_manager_v1.T -> make_xdg_decoration_manager bind proxy
+      | Zwp_relative_pointer_manager_v1.T -> make_relative_pointer_manager bind proxy
       | _ -> Fmt.failwith "Invalid service name for %a" Proxy.pp proxy
   end;
   registry |> Array.iteri (fun name (_, entry) ->

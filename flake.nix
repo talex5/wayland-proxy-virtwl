@@ -28,7 +28,7 @@
                 dune-configurator
                 eio_main
                 ppx_cstruct
-                wayland
+                xmlm  #wayland    (vendored)
                 cmdliner
                 logs
                 ppx_cstruct

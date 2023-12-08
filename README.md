@@ -23,7 +23,7 @@ See [Qubes-lite With KVM and Wayland](https://roscidus.com/blog/blog/2021/03/07/
 
 To install using the Nix flake:
 ```
-nix run github:talex5/wayland-proxy-virtwl
+nix run 'github:talex5/wayland-proxy-virtwl?submodules=1'
 ```
 
 To build from a Git clone:
@@ -32,7 +32,7 @@ To build from a Git clone:
 git clone --recursive https://github.com/talex5/wayland-proxy-virtwl.git
 ```
 
-Then build with either opam (`opam install .`) or Nix (`nix build .`).
+Then build with either opam (`opam install .`) or Nix (`nix build '.?submodules=1'`).
 
 I use the following systemd file to run the proxy
 (in `~/.local/share/systemd/user/wayland-proxy-virtwl.service`):
