@@ -26,9 +26,14 @@ let listen_wayland ~sw ~net ~connect_host ~config wayland_display =
     Fiber.fork_daemon ~sw (fun () ->
         Eio.Net.run_server listening_socket ~on_error (fun conn addr ->
             Log.info (fun f -> f "New connection from %a" Eio.Net.Sockaddr.pp addr);
-            Switch.run @@ fun sw ->
-            let host = connect_host ~sw in
-            Relay.run ~config host conn
+            try
+              Switch.run @@ fun sw ->
+              let host = connect_host ~sw in
+              Relay.run ~config host conn;
+              (* The virtio transport doesn't support shutdown,
+                 so force host listen fiber to be cancelled now. *)
+              Switch.fail sw Exit
+            with Exit -> ()
           )
       );
     `Ok ()
