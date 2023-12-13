@@ -1163,6 +1163,54 @@ module Gtk_primary = struct
     end
 end
 
+let make_locked_pointer ~host_pointer c =
+  let h = host_pointer @@ object
+      inherit [_] H.Zwp_locked_pointer_v1.v1
+      method on_locked _ = C.Zwp_locked_pointer_v1.locked c
+      method on_unlocked _ = C.Zwp_locked_pointer_v1.unlocked c
+    end in
+  Proxy.Handler.attach c @@ object
+    inherit [_] C.Zwp_locked_pointer_v1.v1
+    method on_destroy = delete_with H.Zwp_locked_pointer_v1.destroy h
+    method on_set_region _ ~region = H.Zwp_locked_pointer_v1.set_region h ~region:(Option.map to_host region)
+    method on_set_cursor_position_hint _ ~surface_x ~surface_y =
+      H.Zwp_locked_pointer_v1.set_cursor_position_hint h ~surface_x:surface_x ~surface_y:surface_y
+  end
+
+let make_confined_pointer ~host_pointer c =
+  let h = host_pointer @@ object
+      inherit [_] H.Zwp_confined_pointer_v1.v1
+      method on_confined _ = C.Zwp_confined_pointer_v1.confined c
+      method on_unconfined _ = C.Zwp_confined_pointer_v1.unconfined c
+    end in
+  Proxy.Handler.attach c @@ object
+    inherit [_] C.Zwp_confined_pointer_v1.v1
+    method on_destroy = delete_with H.Zwp_confined_pointer_v1.destroy h
+    method on_set_region _ ~region = H.Zwp_confined_pointer_v1.set_region h ~region:(Option.map to_host region)
+  end
+
+let make_pointer_constraints bind proxy =
+  let proxy = Proxy.cast_version proxy in
+  let h = bind @@ new H.Zwp_pointer_constraints_v1.v1 in
+  Proxy.Handler.attach proxy @@ object
+    inherit [_] C.Zwp_pointer_constraints_v1.v1
+    method on_destroy = delete_with H.Zwp_pointer_constraints_v1.destroy h
+
+    method on_lock_pointer _ locked_pointer ~surface ~pointer ~region ~lifetime =
+      let surface = to_host surface in
+      let pointer = to_host pointer in
+      let region = Option.map to_host region in
+      let host_pointer = H.Zwp_pointer_constraints_v1.lock_pointer h ~surface ~pointer ~region ~lifetime in
+      make_locked_pointer ~host_pointer locked_pointer
+
+    method on_confine_pointer _ locked_pointer ~surface ~pointer ~region ~lifetime =
+      let surface = to_host surface in
+      let pointer = to_host pointer in
+      let region = Option.map to_host region in
+      let host_pointer = H.Zwp_pointer_constraints_v1.confine_pointer h ~surface ~pointer ~region ~lifetime in
+      make_confined_pointer ~host_pointer locked_pointer
+  end
+
 (* This is basically the same as [Gtk_primary], but with things renamed a bit. *)
 module Zwp_primary = struct
   let make_data_offer ~client_offer h =
@@ -1250,6 +1298,7 @@ let registry =
     (module Org_kde_kwin_server_decoration_manager);
     (module Zxdg_decoration_manager_v1);
     (module Zwp_relative_pointer_manager_v1);
+    (module Zwp_pointer_constraints_v1);
   ]
 
 let make_registry ~xwayland t reg =
@@ -1305,6 +1354,7 @@ let make_registry ~xwayland t reg =
       | Org_kde_kwin_server_decoration_manager.T -> make_kde_decoration_manager bind proxy
       | Zxdg_decoration_manager_v1.T -> make_xdg_decoration_manager bind proxy
       | Zwp_relative_pointer_manager_v1.T -> make_relative_pointer_manager bind proxy
+      | Zwp_pointer_constraints_v1.T -> make_pointer_constraints bind proxy
       | _ -> Fmt.failwith "Invalid service name for %a" Proxy.pp proxy
   end;
   registry |> Array.iteri (fun name (_, entry) ->
