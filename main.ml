@@ -27,7 +27,7 @@ let listen_wayland ~sw ~net ~connect_host ~config wayland_display =
         Eio.Net.run_server listening_socket ~on_error (fun conn addr ->
             Log.info (fun f -> f "New connection from %a" Eio.Net.Sockaddr.pp addr);
             try
-              Switch.run @@ fun sw ->
+              Switch.run ~name:"wayland-client" @@ fun sw ->
               let host = connect_host ~sw in
               Relay.run ~config host conn;
               (* The virtio transport doesn't support shutdown,
@@ -55,7 +55,7 @@ let listen_x11 ~sw ~net ~proc_mgr ~config ~connect_host x_display =
 let main ~env setup_tracing use_virtio_gpu wayland_display x_display config args =
   let proc_mgr = env#process_mgr in
   let net = env#net in
-  Switch.run @@ fun sw ->
+  Switch.run ~name:"main" @@ fun sw ->
   setup_tracing ~wayland_display;
   let connect_host ~sw =
     if use_virtio_gpu then (
@@ -126,7 +126,7 @@ let () =
   Printexc.record_backtrace true;
   Eio_main.run @@ fun env ->
   let fs = fst env#fs in
-  Switch.run @@ fun sw ->
+  Switch.run ~name:"cli" @@ fun sw ->
   let virtwl_proxy =
     let info = Cmd.info "wayland-proxy-virtwl" in
     Cmd.v info Term.(ret (const (main ~env) $ Trace.cmdliner ~sw ~fs $ virtio_gpu $ wayland_display $ x_display $ Config.cmdliner $ args))
