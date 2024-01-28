@@ -250,7 +250,7 @@ module Selection = struct
           let mime_type, reply_target = X11.Atom.get_name x11 target |> mime_type_of_target ~targets in
           if List.mem mime_type targets then (
             match
-              Switch.run @@ fun sw ->
+              Switch.run ~name:"selection_request" @@ fun sw ->
               let r, w = Eio_unix.pipe sw in
               Eio_unix.Fd.use_exn "selection_request" (Eio_unix.Resource.fd w) (fun w ->
                   receive ~mime_type ~fd:w;        (* Tell Wayland app to write to [w]. *)
@@ -996,7 +996,7 @@ let quiet_logging () =
 (* We've just spawned an Xwayland process.
    Talk to it using the Wayland and X11 protocols. *)
 let handle_xwayland ~config ~local_wayland ~local_wm_socket ~connect_host =
-  Switch.run @@ fun sw ->
+  Switch.run ~name:"handle_xwayland" @@ fun sw ->
   let x11 = Fiber.fork_promise ~sw (fun () -> X11.Display.connect ~sw local_wm_socket) in
   let host : Host.t = connect_host ~sw in
   let wm_base = Wayland.Registry.bind host.registry @@ object
@@ -1077,7 +1077,7 @@ let handle_xwayland ~config ~local_wayland ~local_wm_socket ~connect_host =
   ]
 
 let spawn_and_run_xwayland ~proc_mgr ~config ~connect_host ~display listen_socket =
-  Switch.run @@ fun sw ->
+  Switch.run ~name:"run_xwayland" @@ fun sw ->
   (* Set up connections between us and Xwayland: *)
   let local_wm_socket, remote_wm_socket = Eio_unix.Net.socketpair_stream ~sw () in
   let local_wayland, remote_wayland = Eio_unix.Net.socketpair_stream ~sw () in

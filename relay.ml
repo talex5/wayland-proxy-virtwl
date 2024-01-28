@@ -1365,7 +1365,7 @@ let make_registry ~xwayland t reg =
 let run ?xwayland ~config host client =
   let t = { host; config } in
   let client_transport = Wayland.Unix_transport.of_socket client in
-  Switch.run (fun sw ->
+  Switch.run ~name:"relay" (fun sw ->
       let s =
         Server.connect ~sw client_transport ~trace:(module Trace.Client) @@ object
           inherit [_] C.Wl_display.v1
