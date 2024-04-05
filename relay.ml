@@ -224,11 +224,11 @@ module Shm : sig
   (** A region within the pools. *)
 
   val create :
-    host_shm:[`V1] H.Wl_shm.t ->
+    host_shm:([< `V1|`V2] as 'v) H.Wl_shm.t ->
     virtio_gpu:Virtio_gpu.t ->
     client_fd:Unix.file_descr ->
     size:int32 ->
-    [`V1] C.Wl_shm_pool.t ->
+    'v C.Wl_shm_pool.t ->
     t
   (** [create ~host_shm ~virtio_gpu ~client_fd ~size proxy] is a pool proxy that creates a host pool of size [size],
       and maps that and [client_fd] into our address space.
@@ -260,13 +260,13 @@ module Shm : sig
   (** [map_buffer user_data] is used by the surface when attaching the buffer. *)
 end = struct
   type mapping = {
-    host_pool : [`V1] H.Wl_shm_pool.t;
+    host_pool : [`V1|`V2] H.Wl_shm_pool.t;
     client_memory_pool : Cstruct.buffer;   (* The client's memory mapped into our address space *)
     host_memory_pool : Cstruct.buffer;     (* The host's memory mapped into our address space *)
   }
 
   type t = {
-    host_shm : [`V1 ] H.Wl_shm.t;
+    host_shm : [`V1|`V2] H.Wl_shm.t;
     virtio_gpu : Virtio_gpu.t;
     mutable size : int32;
     mutable client_fd : Unix.file_descr option; (* [client_fd = None <=> ref_count = 0 *)
@@ -381,7 +381,7 @@ end = struct
 
   let create ~host_shm ~virtio_gpu ~client_fd ~size client_shm =
     let t = {
-      host_shm;
+      host_shm = (host_shm :> [`V1|`V2] H.Wl_shm.t);
       virtio_gpu;
       size;
       client_fd = Some client_fd;
@@ -762,6 +762,8 @@ let make_shm ~virtio_gpu bind c =
         let host_pool = H.Wl_shm.create_pool h ~fd ~size @@ new H.Wl_shm_pool.v1 in
         Unix.close fd;
         make_shm_pool_direct host_pool proxy
+
+    method on_release = delete_with H.Wl_shm.release h
   end
 
 let make_popup ~host_popup c =
