@@ -190,7 +190,7 @@ end
 module Cross_domain_send_recv = struct
   type t = [`Send] to_host
 
-  let max_ids = 4
+  let max_ids = 28
 
   let header_size = 8 + max_ids * 12
 
