@@ -58,7 +58,7 @@ Note: the proxy previously used the virtwl protocol, but virtio-gpu has now repl
 ### crosvm setup
 
 You will need crosvm R123-15786 or later on the host.
-I use [gitlab:talex5/crosvm](https://gitlab.com/talex5/crosvm/-/tree/b0.1.2-rutabaga-release),
+I use [gitlab:talex5/crosvm](https://gitlab.com/talex5/crosvm/-/tree/b124-tal),
 which has some important fixes applied (see the Git log for details).
 It can be run as a Nix flake like this:
 
