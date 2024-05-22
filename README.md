@@ -117,6 +117,12 @@ Limitations:
 
 For more details, see [Isolating Xwayland in a VM][xwayland-blog].
 
+## Socket activation
+
+[systemd-style](https://www.freedesktop.org/software/systemd/man/latest/sd_listen_fds.html)
+socket activation is supported.  A socket named "wayland" must be
+provided, and an additional socket named "x11" may also be provided.
+
 ## Logging
 
 There are several ways to enable logging:

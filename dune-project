@@ -13,7 +13,7 @@
    (cmdliner (>= 1.1.0))
    (cstruct (>= 6.2.0))
    (eio (>= 0.12))
-   (eio_main (>= 0.12))
+   (eio_main (>= 1.1))
    (ppx_cstruct (>= 6.2.0))
    (ocaml (>= 5.0.0))
    (fmt (>= 0.8.9))
