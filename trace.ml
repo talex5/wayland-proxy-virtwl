@@ -142,7 +142,7 @@ module Ring_buffer = struct
 end
 
 let create_ring_control_socket ~sw ~fs ~wayland_display ring =
-  let ring_buffer_log_ctl = Printf.sprintf "/run/user/%d/%s-ctl" (Unix.getuid ()) wayland_display in
+  let ring_buffer_log_ctl = Printf.sprintf "/run/user/%d/%s-ctl" (Unix.getuid ()) (Filename.basename wayland_display) in
   if Sys.file_exists ring_buffer_log_ctl then Unix.unlink ring_buffer_log_ctl;
   Unix.mkfifo ring_buffer_log_ctl 0o600;
   let ring_buffer_log_ctl = (fs, ring_buffer_log_ctl) in

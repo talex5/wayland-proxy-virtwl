@@ -1,5 +1,7 @@
 open Eio.Std
 
+let (let*) = Result.bind
+
 (* Connect to socket at [path] (and then close it), to see if anyone's already listening there. *)
 let is_listening path =
   let s = Unix.(socket PF_UNIX SOCK_STREAM 0) in
@@ -14,48 +16,77 @@ let is_listening path =
 let on_error ex = Log.warn (fun f -> f "Error handling client: %a" Fmt.exn ex)
 
 (* Start a daemon fiber listening for connections to [wayland_display]. *)
-let listen_wayland ~sw ~net ~connect_host ~config wayland_display = 
-  let socket_path = Wayland.Unix_transport.socket_path ~wayland_display () in
-  let existing_socket = Sys.file_exists socket_path in
-  if existing_socket && is_listening socket_path then (
-    Fmt.error "A server is already listening on %S!" socket_path
-  ) else (
-    if existing_socket then Unix.unlink socket_path;
-    let listening_socket = Eio.Net.listen ~backlog:5 ~sw net (`Unix socket_path) in
-    Log.info (fun f -> f "Listening on %S for Wayland clients" socket_path);
-    Fiber.fork_daemon ~sw (fun () ->
-        Eio.Net.run_server listening_socket ~on_error (fun conn addr ->
-            Log.info (fun f -> f "New connection from %a" Eio.Net.Sockaddr.pp addr);
-            try
-              Switch.run @@ fun sw ->
-              let host = connect_host ~sw in
-              Relay.run ~config host conn;
-              (* The virtio transport doesn't support shutdown,
-                 so force host listen fiber to be cancelled now. *)
-              Switch.fail sw Exit
-            with Exit -> ()
-          )
-      );
-    Ok ()
-  )
-
-(* Start a daemon fiber listening for connections to [x_display] and set $DISPLAY. *)
-let listen_x11 ~sw ~net ~proc_mgr ~config ~connect_host x_display = 
-  let xwayland_listening_socket =
-    let path = Printf.sprintf "\x00/tmp/.X11-unix/X%d" x_display in
-    let sock = Eio.Net.listen ~sw net (`Unix path) ~backlog:5 in
-    Log.info (fun f -> f "Listening on %S for X clients" path);
-    sock
+let listen_wayland ~sw ~net ~connect_host ~config ~wayland_socket wayland_display = 
+  let* listening_socket =
+    match wayland_socket with
+    | Some x -> Ok x
+    | None ->
+      let socket_path = Wayland.Unix_transport.socket_path ~wayland_display () in
+      let existing_socket = Sys.file_exists socket_path in
+      if existing_socket && is_listening socket_path then (
+        Fmt.error "A server is already listening on %S!" socket_path
+      ) else (
+        if existing_socket then Unix.unlink socket_path;
+        let listening_socket = Eio.Net.listen ~backlog:5 ~sw net (`Unix socket_path) in
+        Log.info (fun f -> f "Listening on %S for Wayland clients" socket_path);
+        Ok listening_socket
+      )
   in
   Fiber.fork_daemon ~sw (fun () ->
-      Xwayland.listen ~proc_mgr ~config ~connect_host ~display:x_display xwayland_listening_socket
+      Eio.Net.run_server listening_socket ~on_error (fun conn addr ->
+          Log.info (fun f -> f "New connection from %a" Eio.Net.Sockaddr.pp addr);
+          try
+            Switch.run @@ fun sw ->
+            let host = connect_host ~sw in
+            Relay.run ~config host conn;
+            (* The virtio transport doesn't support shutdown,
+               so force host listen fiber to be cancelled now. *)
+            Switch.fail sw Exit
+          with Exit -> ()
+        )
     );
-  Unix.putenv "DISPLAY" (Printf.sprintf ":%d" x_display)
+  Ok ()
+
+(* Start a daemon fiber listening for connections to [x_display] and set $DISPLAY. *)
+let listen_x11 ~sw ~net ~proc_mgr ~config ~connect_host ~x11_socket x_display = 
+  match x11_socket, x_display with
+  | None, None -> Ok ()
+  | Some _, None -> Error "x11 socket passed, but no --x-display option set"
+  | _, Some x_display ->
+    let xwayland_listening_socket =
+      match x11_socket with
+      | Some x -> x
+      | None ->
+        let path = Printf.sprintf "\x00/tmp/.X11-unix/X%d" x_display in
+        let sock = Eio.Net.listen ~sw net (`Unix path) ~backlog:5 in
+        Log.info (fun f -> f "Listening on %S for X clients" path);
+        sock
+    in
+    Fiber.fork_daemon ~sw (fun () ->
+        Xwayland.listen ~proc_mgr ~config ~connect_host ~display:x_display xwayland_listening_socket
+      );
+    Unix.putenv "DISPLAY" (Printf.sprintf ":%d" x_display);
+    Ok ()
+
+let get_wayland_display ?socket display =
+  match display, socket with
+  | Some d, None -> Ok d
+  | None, None -> Ok "wayland-1"
+  | Some _, Some _ -> Error "--wayland-display cannot be used with socket activation"
+  | None, Some socket ->
+    match Eio.Net.listening_addr socket with
+    | `Unix path -> Ok path
+    | _ -> Error "Activated with non-unix \"wayland\" socket"
 
 let main ~env setup_tracing use_virtio_gpu wayland_display x_display config args =
   let proc_mgr = env#process_mgr in
   let net = env#net in
   Switch.run @@ fun sw ->
+  (* If socket activation is being used, collect the sockets now: *)
+  let* wayland_socket = Sd_listen_fds.import ~sw "wayland" in
+  let* x11_socket = Sd_listen_fds.import ~sw "x11" in
+  let* () = Sd_listen_fds.ensure_all_consumed () in
+  let* wayland_display = get_wayland_display ?socket:wayland_socket wayland_display in
   setup_tracing ~wayland_display;
   let connect_host ~sw =
     if use_virtio_gpu then (
@@ -73,10 +104,9 @@ let main ~env setup_tracing use_virtio_gpu wayland_display x_display config args
     )
   in
   (* Listen for incoming Wayland client connections: *)
-  let (let*) = Result.bind in
-  let* () = listen_wayland ~sw ~net ~config ~connect_host wayland_display in
+  let* () = listen_wayland ~sw ~net ~config ~connect_host ~wayland_socket wayland_display in
   (* Listen for incoming X11 client connections, if configured: *)
-  Option.iter (listen_x11 ~sw ~net ~proc_mgr ~config ~connect_host) x_display;
+  let* () = listen_x11 ~sw ~net ~proc_mgr ~config ~connect_host ~x11_socket x_display in
   (* Run the application (if any), or just wait (if not): *)
   match args with
   | [] -> Fiber.await_cancel ()
@@ -102,7 +132,7 @@ let x_display =
 
 let wayland_display =
   Arg.value @@
-  Arg.(opt string) "wayland-1" @@
+  Arg.(opt (some string)) None @@
   Arg.info
     ~doc:"Name or path of socket to listen on"
     ["wayland-display"]
