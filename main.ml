@@ -18,7 +18,7 @@ let listen_wayland ~sw ~net ~connect_host ~config wayland_display =
   let socket_path = Wayland.Unix_transport.socket_path ~wayland_display () in
   let existing_socket = Sys.file_exists socket_path in
   if existing_socket && is_listening socket_path then (
-    `Error (false, Fmt.str "A server is already listening on %S!" socket_path)
+    Fmt.error "A server is already listening on %S!" socket_path
   ) else (
     if existing_socket then Unix.unlink socket_path;
     let listening_socket = Eio.Net.listen ~backlog:5 ~sw net (`Unix socket_path) in
@@ -36,7 +36,7 @@ let listen_wayland ~sw ~net ~connect_host ~config wayland_display =
             with Exit -> ()
           )
       );
-    `Ok ()
+    Ok ()
   )
 
 (* Start a daemon fiber listening for connections to [x_display] and set $DISPLAY. *)
@@ -73,24 +73,23 @@ let main ~env setup_tracing use_virtio_gpu wayland_display x_display config args
     )
   in
   (* Listen for incoming Wayland client connections: *)
-  match listen_wayland ~sw ~net ~config ~connect_host wayland_display with
-  | `Error _ as e -> e
-  | `Ok () ->
-    (* Listen for incoming X11 client connections, if configured: *)
-    Option.iter (listen_x11 ~sw ~net ~proc_mgr ~config ~connect_host) x_display;
-    (* Run the application (if any), or just wait (if not): *)
-    match args with
-    | [] -> Fiber.await_cancel ()
-    | args ->
-      let env =
-        Unix.environment ()
-        |> Array.to_list
-        |> Unix_env.replace "WAYLAND_DISPLAY" wayland_display
-        |> Array.of_list
-      in
-      let status = Eio.Process.spawn ~sw proc_mgr args ~env |> Eio.Process.await in
-      Log.info (fun f -> f "Application process ended (%a)" Eio.Process.pp_status status);
-      `Ok ()
+  let (let*) = Result.bind in
+  let* () = listen_wayland ~sw ~net ~config ~connect_host wayland_display in
+  (* Listen for incoming X11 client connections, if configured: *)
+  Option.iter (listen_x11 ~sw ~net ~proc_mgr ~config ~connect_host) x_display;
+  (* Run the application (if any), or just wait (if not): *)
+  match args with
+  | [] -> Fiber.await_cancel ()
+  | args ->
+    let env =
+      Unix.environment ()
+      |> Array.to_list
+      |> Unix_env.replace "WAYLAND_DISPLAY" wayland_display
+      |> Array.of_list
+    in
+    let status = Eio.Process.spawn ~sw proc_mgr args ~env |> Eio.Process.await in
+    Log.info (fun f -> f "Application process ended (%a)" Eio.Process.pp_status status);
+    Ok ()
 
 open Cmdliner
 
@@ -129,6 +128,6 @@ let () =
   Switch.run @@ fun sw ->
   let virtwl_proxy =
     let info = Cmd.info "wayland-proxy-virtwl" in
-    Cmd.v info Term.(ret (const (main ~env) $ Trace.cmdliner ~sw ~fs $ virtio_gpu $ wayland_display $ x_display $ Config.cmdliner $ args))
+    Cmd.v info Term.(const (main ~env) $ Trace.cmdliner ~sw ~fs $ virtio_gpu $ wayland_display $ x_display $ Config.cmdliner $ args)
   in
-  exit @@ Cmd.eval virtwl_proxy
+  exit @@ Cmd.eval_result virtwl_proxy
