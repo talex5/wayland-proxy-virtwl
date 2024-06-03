@@ -8,7 +8,7 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        ocamlPackages = pkgs.ocaml-ng.ocamlPackages_5_0;
+        inherit (pkgs) ocamlPackages;
       in
       {
         packages = {
