@@ -32,12 +32,17 @@ type unpaired = {
   set_configured : [`Show | `Hide | `Unmanaged] -> unit;
 }
 
+type toplevel = {
+  xdg : [`V1] Xdg_toplevel.t;
+  decor : [`V1] Xdg_decoration.t option;
+}
+
 type paired = {
   window : X11.Window.t;
   unmap : unit -> unit;
   xdg_surface : [`V1] Xdg_surface.t;
   mutable xdg_role : [
-    | `Toplevel of [`V1] Xdg_toplevel.t
+    | `Toplevel of toplevel
     | `Popup of [`V1] Xdg_popup.t
     | `None
   ];
@@ -57,7 +62,7 @@ let pp_paired f { window; unmap = _; xdg_surface; xdg_role; geometry; override_r
     Proxy.pp xdg_surface
     X11.Geometry.pp geometry
     (fun f -> match xdg_role with
-       | `Toplevel x -> Proxy.pp f x
+       | `Toplevel x -> Proxy.pp f x.xdg
        | `Popup x -> Proxy.pp f x
        | `None -> Fmt.string f "(no role)"
     )
@@ -598,14 +603,17 @@ let init_toplevel t ~x11 ~xdg_surface ~info ~paired window =
           )
     end
   in
-  t.decor_mgr |> Option.iter (fun decor_mgr ->
-      let decor = Xdg_decor_mgr.get_toplevel_decoration decor_mgr ~toplevel @@ object
-          inherit [_] Xdg_decoration.v1
-          method on_configure _ ~mode:_ = ()
-        end
-      in
-      Xdg_decoration.set_mode decor ~mode:Xdg_decoration.Mode.Server_side;
-    );
+  let decor =
+    t.decor_mgr |> Option.map (fun decor_mgr ->
+        let decor = Xdg_decor_mgr.get_toplevel_decoration decor_mgr ~toplevel @@ object
+            inherit [_] Xdg_decoration.v1
+            method on_configure _ ~mode:_ = ()
+          end
+        in
+        Xdg_decoration.set_mode decor ~mode:Xdg_decoration.Mode.Server_side;
+        decor
+      )
+  in
   Xdg_toplevel.set_title toplevel ~title:(t.config.tag ^ info.title);
   X11.Icccm.Wm_normal_hints.min_size info.wm_normal_hints |> Option.iter (fun (width, height) ->
       let scale = Int32.of_int t.config.xunscale in
@@ -613,7 +621,7 @@ let init_toplevel t ~x11 ~xdg_surface ~info ~paired window =
       let height = Int32.div height scale in
       Xdg_toplevel.set_min_size toplevel ~width ~height
     );
-  toplevel
+  { xdg = toplevel; decor }
 
 (* Set the popup role for an xdg_surface. *)
 let init_popup t ~x11 ~xdg_surface ~info ~parent ~paired window =
@@ -703,7 +711,7 @@ let pair t ~set_configured ~host_surface window =
         let parent = if info.window_type = `Normal then parent else fallback_parent in
         parent |> Option.iter (fun parent ->
             match parent.xdg_role with
-            | `Toplevel parent -> Xdg_toplevel.set_parent toplevel ~parent:(Some parent)
+            | `Toplevel parent -> Xdg_toplevel.set_parent toplevel.xdg ~parent:(Some parent.xdg)
             | _ -> Log.info (fun f -> f "Parent %a is not a toplevel!" pp_paired parent)
           );
         Wayland.Wayland_client.Wl_surface.commit host_surface
@@ -735,7 +743,9 @@ let rec pair_when_ready ~x11 t window wayland_id =
 let unpair t paired =
   begin match paired.xdg_role with
     | `Popup role -> Xdg_popup.destroy role
-    | `Toplevel role -> Xdg_toplevel.destroy role
+    | `Toplevel toplevel ->
+      Option.iter Xdg_decoration.destroy toplevel.decor;
+      Xdg_toplevel.destroy toplevel.xdg
     | `None -> ()
   end;
   Xdg_surface.destroy paired.xdg_surface;
@@ -965,8 +975,8 @@ let listen_x11 ~selection t =
             match Hashtbl.find_opt t.paired window with
             | Some { xdg_role = `Toplevel toplevel; _ } ->
               let title = X11.Property.get_string x11 window atom |> Option.value ~default:"<untitled>" in
-              if Proxy.can_send toplevel then
-                Xdg_toplevel.set_title toplevel ~title:(t.config.tag ^ title)
+              if Proxy.can_send toplevel.xdg then
+                Xdg_toplevel.set_title toplevel.xdg ~title:(t.config.tag ^ title)
             | _ -> ()
           )
         )
