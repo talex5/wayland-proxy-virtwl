@@ -9,7 +9,7 @@ let listen_fds_start = 3
 let init () =
   match int_of_string (Sys.getenv "LISTEN_FDS") with
   | exception Not_found -> Error "LISTEN_FDS not set"
-  | exception Invalid_argument _ -> Error "LISTEN_FDS not an integer"
+  | exception Failure _ -> Error "LISTEN_FDS not an integer"
   | total_fds ->
     let names =
       match Sys.getenv_opt "LISTEN_FDNAMES" |> Option.value ~default:"" with
