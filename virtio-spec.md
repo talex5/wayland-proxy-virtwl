@@ -15,7 +15,7 @@ For the proxy's code, see [dev.mli](./virtio_gpu/dev.mli) and [dev.ml](./virtio_
 
 ### Setup
 
-Open device files in `/dev/dri/*` and call `drmGetVersion` on each one until you find one with the name "virtio_gpu".
+Open device files in `/dev/dri/*` and call `drmGetVersion` on each one until you find one with the name `"virtio_gpu"`.
 The `card*` files give full access to the device, whereas the `render*` ones provide a safe subset for unprivileged applications.
 However, on my system my default user account only had access to `card0`.
 
@@ -78,7 +78,7 @@ The request gives the width, height, format and flags for the new buffer.
 crosvm replies by writing a response to the start of the shared page.
 
 Use `DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB` with the `blob_id` from the query
-to create a new blob. Oddly, the blob_id is not the ID of the blob.
+to create a new blob. Oddly, the `blob_id` is not the ID of the blob.
 It seems more like a template that can be used to create blobs, which are returned as gem handles.
 
 Note that these template resources are never freed (until the device itself is closed),
