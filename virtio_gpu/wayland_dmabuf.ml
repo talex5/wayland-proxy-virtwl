@@ -1,7 +1,5 @@
 open Wayland_protocols.Linux_dmabuf_unstable_v1_client
 
-open Eio.Std
-
 type modifiers = { hi : int32; lo : int32 }
 type fmt = Drm_format.t * modifiers
 
@@ -34,40 +32,6 @@ let get_format t fmt =
   match Hashtbl.find_opt t.formats fmt with
   | None -> None
   | Some mods -> Some (fmt, mods)
-
-let probe_drm t (image : Dev.image) =
-  let fmt = Drm_format.xr24 in
-  match Hashtbl.find_opt t.formats fmt with
-  | None ->
-    Log.info (fun f -> f "probe_drm: doesn't support test format %a, so can't probe" Drm_format.pp fmt);
-    false
-  | Some mods ->
-    let result, set_result = Promise.create () in
-    let params = Zwp_linux_dmabuf_v1.create_params t.proxy @@ object
-        inherit [_] Zwp_linux_buffer_params_v1.v1
-        method on_created self buffer =
-          Log.info (fun f -> f "probe_drm: succeeded - we can use video memory");
-          Wayland.Wayland_client.Wl_buffer.destroy (Wayland.Proxy.cast_version buffer);
-          Promise.resolve set_result true;
-          Zwp_linux_buffer_params_v1.destroy self
-        method on_failed self =
-          Log.info (fun f -> f "probe_drm: FAILED - we cannot use video memory");
-          Promise.resolve set_result false;
-          Zwp_linux_buffer_params_v1.destroy self
-      end in
-    Zwp_linux_buffer_params_v1.add params
-      ~fd:image.fd
-      ~offset:image.offset
-      ~stride:image.stride
-      ~modifier_lo:mods.lo
-      ~modifier_hi:mods.hi
-      ~plane_idx:0l;
-    Zwp_linux_buffer_params_v1.create params
-      ~width:1l
-      ~height:1l
-      ~format:(fmt :> int32)
-      ~flags:0l;
-    Promise.await result
 
 let create_immed t (fmt, mods) (image : Dev.image) =
   let params = Zwp_linux_dmabuf_v1.create_params t.proxy @@ object

@@ -123,15 +123,12 @@ let or_die = function
   | Ok x -> x
   | Error (`Msg m) -> output_string stderr (m ^ "\n"); flush stderr; exit 1
 
-let get_dmabuf gpu = function
+let get_dmabuf _gpu = function
   | None -> None
   | Some dma ->
     match Virtio_gpu.Wayland_dmabuf.get_format dma Virtio_gpu.Drm_format.xr24 with
     | None -> None
-    | Some fmt ->
-      let supported = Virtio_gpu.probe_drm gpu dma in
-      if supported then Some (dma, fmt)
-      else None
+    | Some fmt -> Some (dma, fmt)
 
 let () =
   Logs.set_reporter (Logs_fmt.reporter ());
