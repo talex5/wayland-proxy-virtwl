@@ -6,6 +6,9 @@ type transport = < Wayland.S.transport; close : unit >
 
 type t
 
+val device_string : t -> string
+(** [device_string t] returns the [dev_t] corresponding to the backing file descriptor. *)
+
 val default_dri_dir : 'a Eio.Path.t -> 'a Eio.Path.t
 (** [default_dri_dir fs] is [fs / "/dev/dri"]. *)
 

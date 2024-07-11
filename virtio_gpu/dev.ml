@@ -51,6 +51,7 @@ let get_dev t =
 
 type version
 
+external drm_get_dev : Unix.file_descr -> string = "ocaml_drm_get_dev"
 external drm_get_version : Unix.file_descr -> version = "ocaml_drm_get_version"
 external drm_get_caps : Unix.file_descr -> Cstruct.buffer -> unit = "ocaml_drm_get_caps"
 external drm_version_name : version -> string = "ocaml_drm_version_name"
@@ -154,6 +155,9 @@ let of_fd ~sw fd =
       alloc_cache = Hashtbl.create 100;
     }
   )
+
+let get_dev_string t =
+  Eio_unix.Fd.use_exn "get_dev_string" (get_dev t) drm_get_dev
 
 (* Each time we query crosvm, it allocates a new resource which is never freed (while the device is open).
    So cache every response. *)

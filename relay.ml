@@ -107,7 +107,10 @@ module CD = struct
 
   type 'v buffer = [
     | `Virtwl of 'v virtwl_buffer Lazy.t
-    | `Direct of 'v H.Wl_buffer.t
+    | `Direct of 'v H.Wl_buffer.t (* This also includes dma buffers,
+                                     whether direct or otherwise!
+                                     All of the complexity is handled entirely by
+                                     the guest kernel. *)
   ]
 
   type surface_state =
@@ -558,7 +561,7 @@ let make_subcompositor ~xwayland bind proxy =
       make_subsurface ~xwayland ~host_subsurface subsurface
   end
 
-let make_buffer b proxy =
+let make_shm_buffer b proxy =
   let user_data = client_data (Buffer (Shm.user_data b)) in
   Proxy.Handler.attach proxy @@ object
     inherit [_] C.Wl_buffer.v1
@@ -575,7 +578,7 @@ let make_shm_pool_virtwl ~virtio_gpu ~host_shm proxy ~fd:client_fd ~size:orig_si
 
     method on_create_buffer _ buffer ~offset ~width ~height ~stride ~format =
       let b = Shm.create_buffer mapping ~offset ~width ~height ~stride ~format buffer in
-      make_buffer b buffer
+      make_shm_buffer b buffer
 
     method on_destroy t = Proxy.delete t
 
@@ -750,7 +753,7 @@ let make_shm ~virtio_gpu bind c =
   let c = Proxy.cast_version c in
   let h = bind @@ object
       inherit [_] H.Wl_shm.v1
-      method on_format _ = C.Wl_shm.format c
+      method on_format _ ~format = C.Wl_shm.format c ~format
     end
   in
   Proxy.Handler.attach c @@ object
@@ -764,6 +767,86 @@ let make_shm ~virtio_gpu bind c =
         make_shm_pool_direct host_pool proxy
 
     method on_release = delete_with H.Wl_shm.release h
+  end
+
+let make_linux_dmabuf ?(override_dev:string option) bind c =
+  let make_linux_buffer_params ~host_linux_buffer_params c =
+    let proxy = cv c in
+    let make_dma_buffer ~client_buffer h =
+      let c = client_buffer @@ object
+        inherit [_] C.Wl_buffer.v1
+        method on_destroy c = delete_with H.Wl_buffer.destroy h c
+      end in
+      Proxy.Handler.attach h @@ object
+        inherit [_] H.Wl_buffer.v1
+        method on_release _ = C.Wl_buffer.release c
+      end
+    in
+    let h = host_linux_buffer_params @@ object
+      inherit [_] H.Zwp_linux_buffer_params_v1.v1
+      method on_failed _ = C.Zwp_linux_buffer_params_v1.failed proxy
+      method on_created _ buffer = make_dma_buffer ~client_buffer:(C.Zwp_linux_buffer_params_v1.created proxy) buffer
+    end
+    in
+    Proxy.Handler.attach proxy @@ object
+      inherit [_] C.Zwp_linux_buffer_params_v1.v1
+      method on_destroy = delete_with H.Zwp_linux_buffer_params_v1.destroy h
+      method on_create_immed _ buffer ~width ~height ~format ~flags =
+        let host_buffer = H.Zwp_linux_buffer_params_v1.create_immed h ~width ~height ~format ~flags @@ object
+          inherit [_] H.Wl_buffer.v1
+          method on_release _ = C.Wl_buffer.release buffer
+        end in
+        Proxy.Handler.attach buffer @@ object
+          inherit [_] C.Wl_buffer.v1
+          method! user_data = client_data (Buffer (`Direct host_buffer))
+          method on_destroy = delete_with H.Wl_buffer.destroy host_buffer
+        end
+      method on_create _ ~width ~height ~format ~flags =
+        H.Zwp_linux_buffer_params_v1.create h ~width ~height ~format ~flags
+      method on_add _ ~fd ~plane_idx ~offset ~stride ~modifier_hi ~modifier_lo =
+        H.Zwp_linux_buffer_params_v1.add h ~fd ~plane_idx ~offset ~stride ~modifier_hi ~modifier_lo
+    end
+  in
+  let make_linux_dmabuf_feedback ?override_dev ~host_dmabuf_feedback c =
+    let proxy = cv c in
+    let h = host_dmabuf_feedback @@ object
+      inherit [_] H.Zwp_linux_dmabuf_feedback_v1.v1
+      method on_done _ = C.Zwp_linux_dmabuf_feedback_v1.done_ c
+      method on_format_table _ = C.Zwp_linux_dmabuf_feedback_v1.format_table c
+      method on_main_device _ ~(device:string) =
+        C.Zwp_linux_dmabuf_feedback_v1.main_device c ~device:(
+          match override_dev with Some dev -> dev | None -> device)
+      method on_tranche_done _ = C.Zwp_linux_dmabuf_feedback_v1.tranche_done c
+      method on_tranche_target_device _ ~device =
+        C.Zwp_linux_dmabuf_feedback_v1.tranche_target_device c ~device:(
+          match override_dev with Some dev -> dev | None -> device)
+      method on_tranche_formats _ = C.Zwp_linux_dmabuf_feedback_v1.tranche_formats c
+      method on_tranche_flags _ = C.Zwp_linux_dmabuf_feedback_v1.tranche_flags c
+    end
+    in Proxy.Handler.attach proxy @@ object
+      inherit [_] C.Zwp_linux_dmabuf_feedback_v1.v1
+      method on_destroy = delete_with H.Zwp_linux_dmabuf_feedback_v1.destroy h
+    end
+  in
+  let h = bind @@ object
+      inherit [_] H.Zwp_linux_dmabuf_v1.v1
+      method on_format _ ~format = C.Zwp_linux_dmabuf_v1.format c ~format
+      method on_modifier _ ~format ~modifier_hi ~modifier_lo =
+        C.Zwp_linux_dmabuf_v1.modifier c ~format ~modifier_hi ~modifier_lo
+    end
+  in
+  Proxy.Handler.attach c @@ object
+    inherit [_] C.Zwp_linux_dmabuf_v1.v1
+    method on_destroy = delete_with H.Zwp_linux_dmabuf_v1.destroy h
+    method on_create_params _ params_id =
+      let host_linux_buffer_params = H.Zwp_linux_dmabuf_v1.create_params h in
+      make_linux_buffer_params ~host_linux_buffer_params params_id
+    method on_get_surface_feedback _ id ~surface =
+      let host_dmabuf_feedback = H.Zwp_linux_dmabuf_v1.get_surface_feedback h ~surface:(to_host surface) in
+      make_linux_dmabuf_feedback ?override_dev ~host_dmabuf_feedback id
+    method on_get_default_feedback _ id =
+      let host_dmabuf_feedback = H.Zwp_linux_dmabuf_v1.get_default_feedback h in
+      make_linux_dmabuf_feedback ?override_dev ~host_dmabuf_feedback id
   end
 
 let make_popup ~host_popup c =
@@ -1301,9 +1384,10 @@ let registry =
     (module Zxdg_decoration_manager_v1);
     (module Zwp_relative_pointer_manager_v1);
     (module Zwp_pointer_constraints_v1);
+    (module Zwp_linux_dmabuf_v1);
   ]
 
-let make_registry ~xwayland t reg =
+let make_registry ~xwayland ?override_dev t reg =
   let registry =
     registry |> List.concat_map (fun (module M : Metadata.S) ->
         match Registry.get t.host.registry M.interface with
@@ -1357,6 +1441,7 @@ let make_registry ~xwayland t reg =
       | Zxdg_decoration_manager_v1.T -> make_xdg_decoration_manager bind proxy
       | Zwp_relative_pointer_manager_v1.T -> make_relative_pointer_manager bind proxy
       | Zwp_pointer_constraints_v1.T -> make_pointer_constraints bind proxy
+      | Zwp_linux_dmabuf_v1.T -> make_linux_dmabuf ?override_dev bind proxy
       | _ -> Fmt.failwith "Invalid service name for %a" Proxy.pp proxy
   end;
   registry |> Array.iteri (fun name (_, entry) ->
@@ -1364,14 +1449,14 @@ let make_registry ~xwayland t reg =
       C.Wl_registry.global reg ~name:(Int32.of_int name) ~interface:M.interface ~version
     )
 
-let run ?xwayland ~config host client =
+let run ?xwayland ~config ?override_dev host client =
   let t = { host; config } in
   let client_transport = Wayland.Unix_transport.of_socket client in
   Switch.run (fun sw ->
       let s =
         Server.connect ~sw client_transport ~trace:(module Trace.Client) @@ object
           inherit [_] C.Wl_display.v1
-          method on_get_registry _ ref = make_registry ~xwayland t ref
+          method on_get_registry _ ref = make_registry ~xwayland ?override_dev t ref
           method on_sync _ cb =
             Proxy.Handler.attach cb @@ new C.Wl_callback.v1;
             let h : _ Proxy.t = H.Wl_display.sync (Client.wl_display host.display) @@ object

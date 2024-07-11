@@ -1,4 +1,4 @@
-open Wayland_protocols.Linux_dmabuf_unstable_v1_client
+open Wayland_protocols.Linux_dmabuf_v1_client
 
 type modifiers = { hi : int32; lo : int32 }
 type fmt = Drm_format.t * modifiers
@@ -24,8 +24,8 @@ let create wayland r =
   | proxy ->
     Wayland.Client.sync wayland;
     Some { proxy; formats }
-  | exception ex ->
-    Log.info (fun f -> f "Can't find dmabuf: %a" Fmt.exn ex);
+  | exception Not_found ->
+    Log.info (fun f -> f "Can't find dmabuf");
     None
 
 let get_format t fmt =

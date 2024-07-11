@@ -45,3 +45,7 @@ val close : t -> unit
 
 val is_closed : t -> bool
 (** [is_closed t] is [true] after [close t] has been called. *)
+
+val get_dev_string : t -> string
+(** [get_dev_string t] returns the string used in the Wayland protocol to refer to
+    the device used. *)

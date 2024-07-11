@@ -1,7 +1,7 @@
 val listen :
   proc_mgr:_ Eio_unix.Process.mgr ->
   config:Config.t ->
-  connect_host:(sw:Eio.Switch.t -> Host.t) ->
+  connect_host:(sw:Eio.Switch.t -> Host.t * string option) ->
   display:int ->
   _ Eio_unix.Net.listening_socket ->
   'a

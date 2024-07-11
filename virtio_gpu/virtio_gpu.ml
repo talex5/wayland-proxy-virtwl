@@ -114,3 +114,5 @@ let close t = Dev.close t.dev
 let alloc t = Dev.alloc t.dev
 
 let wayland_transport t = t.transport
+
+let device_string t = Dev.get_dev_string t.dev
