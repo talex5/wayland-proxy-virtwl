@@ -190,6 +190,25 @@ let to_host (type a) (c : (a, 'v, [`Server]) Proxy.t) : (a, 'v, [`Client]) Proxy
     (* Here, a client Gtk corresponds to a host Zwp, so the types aren't right. *)
     failwith "Can't use to_host with GTK translation"
 
+(* Validation *)
+module V = struct
+  let max_window_width_int32 = 16384l
+  let max_window_height_int32 = 6144l
+  let check_width_height_int32 ~width ~height =
+    (* FIXME: proper protocol errors *)
+    if width <= 0l then (
+      failwith "Width is negative or 0"
+    ) else if width > max_window_width_int32 then (
+      failwith "Width is excessive"
+    ) else if height <= 0l then (
+      failwith "Height is negative or 0"
+    ) else if height > max_window_height_int32 then (
+      failwith "Height is excessive"
+    ) else (
+      ()
+    )
+end
+
 (* When the client asks to destroy something, delay the ack until the host object is destroyed.
    This means the client sees events in the usual order, and means we can continue forwarding
    any events the host sends before hearing about the deletion. *)
@@ -346,7 +365,10 @@ end = struct
     )
 
   let create_buffer t ~offset ~width ~height ~stride ~format buffer : buffer =
+    (* FIXME: check that stride is valid for format, width, height, and offset *)
+    V.check_width_height_int32 ~width ~height;
     assert (t.ref_count > 0);   (* The shm_pool proxy must exist to call this. *)
+    (* FIXME: check reference count overflow *)
     t.ref_count <- t.ref_count + 1;
     Proxy.on_delete buffer (fun () -> dec_ref t);
     let data =
@@ -452,12 +474,16 @@ let make_surface ~xwayland ~host_surface c =
       H.Wl_surface.commit h
 
     method on_damage _ ~x ~y ~width ~height =
+      (* FIXME: bounds check *)
+      V.check_width_height_int32 ~width ~height;
       when_configured @@ fun () ->
       let (x, y) = scale_to_host ~xwayland (x, y) in
       let (width, height) = scale_to_host ~xwayland (width, height) in
       H.Wl_surface.damage h ~x ~y ~width ~height
 
     method on_damage_buffer _ ~x ~y ~width ~height =
+      (* FIXME: bounds check *)
+      V.check_width_height_int32 ~width ~height;
       when_configured @@ fun () ->
       H.Wl_surface.damage_buffer h ~x ~y ~width ~height
 
@@ -577,6 +603,8 @@ let make_shm_pool_virtwl ~virtio_gpu ~host_shm proxy ~fd:client_fd ~size:orig_si
     inherit [_] C.Wl_shm_pool.v1
 
     method on_create_buffer _ buffer ~offset ~width ~height ~stride ~format =
+      (* FIXME: check parameters *)
+      V.check_width_height_int32 ~width ~height;
       let b = Shm.create_buffer mapping ~offset ~width ~height ~stride ~format buffer in
       make_shm_buffer b buffer
 
@@ -590,6 +618,7 @@ let make_shm_pool_direct host_pool proxy =
     inherit [_] C.Wl_shm_pool.v1
 
     method on_create_buffer _ buffer ~offset ~width ~height ~stride ~format =
+      V.check_width_height_int32 ~width ~height;
       let host_buffer = H.Wl_shm_pool.create_buffer host_pool ~offset ~width ~height ~stride ~format @@ object
           inherit [_] H.Wl_buffer.v1
           method on_release _ = C.Wl_buffer.release buffer
@@ -788,10 +817,12 @@ module Linux_dmabuf = struct
       method on_created _ buffer = make_dma_buffer ~client_buffer:(C.Zwp_linux_buffer_params_v1.created proxy) buffer
     end
     in
+    let expected_plain_idx = ref 0l in
     Proxy.Handler.attach proxy @@ object
       inherit [_] C.Zwp_linux_buffer_params_v1.v1
       method on_destroy = delete_with H.Zwp_linux_buffer_params_v1.destroy h
       method on_create_immed _ buffer ~width ~height ~format ~flags =
+        V.check_width_height_int32 ~width ~height;
         let host_buffer = H.Zwp_linux_buffer_params_v1.create_immed h ~width ~height ~format ~flags @@ object
           inherit [_] H.Wl_buffer.v1
           method on_release _ = C.Wl_buffer.release buffer
@@ -802,9 +833,20 @@ module Linux_dmabuf = struct
           method on_destroy = delete_with H.Wl_buffer.destroy host_buffer
         end
       method on_create _ ~width ~height ~format ~flags =
+        V.check_width_height_int32 ~width ~height;
         H.Zwp_linux_buffer_params_v1.create h ~width ~height ~format ~flags
       method on_add _ ~fd ~plane_idx ~offset ~stride ~modifier_hi ~modifier_lo =
-        H.Zwp_linux_buffer_params_v1.add h ~fd ~plane_idx ~offset ~stride ~modifier_hi ~modifier_lo
+        (* We must fix up the buffer parameters *)
+        if plane_idx < 0l then (
+          failwith "Negative plane index"
+        ) else if !expected_plain_idx != plane_idx then (
+          failwith "Wrong plane index"
+        ) else if offset < 0l then (
+          failwith "Negative offset"
+        ) else (
+          (* FIXME: check offset and stride *)
+          H.Zwp_linux_buffer_params_v1.add h ~fd ~plane_idx ~offset ~stride ~modifier_hi ~modifier_lo
+        )
     end
 
   let make_linux_dmabuf_feedback ?override_dev ~host_dmabuf_feedback c =
@@ -985,7 +1027,9 @@ let make_zxdg_output ~xwayland ~host_xdg_output c =
         C.Zxdg_output_v1.logical_position c ~x ~y
 
       method on_logical_size _ ~width ~height =
+        V.check_width_height_int32 ~width ~height;
         let (width, height) = scale_to_client ~xwayland (width, height) in
+        V.check_width_height_int32 ~width ~height;
         C.Zxdg_output_v1.logical_size c ~width ~height
 
       method on_name _ = C.Zxdg_output_v1.name c
