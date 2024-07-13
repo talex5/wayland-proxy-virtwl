@@ -22,7 +22,7 @@ val of_fd : sw:Switch.t -> Eio_unix.Fd.t -> t option
 (** [of_fd ~sw x] checks that [x] is a virtio-gpu device and
     initialises it. Returns [None] if it's not a virtio-device. *)
 
-val alloc : t -> query -> image
+val alloc : t -> gpu:bool -> query -> image
 (** [alloc t query] allocates a buffer matching [query] on the host and returns a handle to it.
     Use {!Utils.safe_map_file} to map it. *)
 

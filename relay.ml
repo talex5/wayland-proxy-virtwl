@@ -277,14 +277,14 @@ end = struct
     mutable mapping : mapping option;           (* If [None] then map when needed *)
   }
 
-  let with_memory_fd t ~size fn =
+  let with_memory_fd t ~size ~(gpu:bool) fn =
     let query = {
       Virtio_gpu.Dev.
       width = Int32.of_int size;
       height = 1l;
       drm_format = Virtio_gpu.Drm_format.r8;
     } in
-    let image = Virtio_gpu.alloc t.virtio_gpu query in
+    let image = Virtio_gpu.alloc t.virtio_gpu ~gpu query in
     match fn image with
     | x -> Unix.close image.fd; x
     | exception ex -> Unix.close image.fd; raise ex
@@ -300,7 +300,7 @@ end = struct
       let size = Int32.to_int t.size in
       let client_memory_pool = Unix.map_file client_fd Bigarray.Char Bigarray.c_layout true [| size |] in
       let host_pool, host_memory_pool =
-        with_memory_fd t ~size (fun { Virtio_gpu.Dev.fd; host_size; offset; _ } ->
+        with_memory_fd t ~size ~gpu:false (fun { Virtio_gpu.Dev.fd; host_size; offset; _ } ->
             let host_pool = H.Wl_shm.create_pool t.host_shm ~fd ~size:t.size @@ new H.Wl_shm_pool.v1 in
             let host_memory = Virtio_gpu.Utils.safe_map_file fd
                 ~kind:Bigarray.Char
@@ -828,7 +828,8 @@ module Linux_dmabuf = struct
       method on_destroy = delete_with H.Zwp_linux_dmabuf_feedback_v1.destroy h
     end
 
-  let make_linux_dmabuf ?(override_dev:string option) bind c =
+  let make_linux_dmabuf ~(virtio_gpu:Virtio_gpu.t option) bind c =
+    let override_dev = Option.map Virtio_gpu.device_string virtio_gpu in
     let h = bind @@ object
         inherit [_] H.Zwp_linux_dmabuf_v1.v1
         method on_format _ ~format = C.Zwp_linux_dmabuf_v1.format c ~format
@@ -1389,7 +1390,7 @@ let registry =
     (module Zwp_linux_dmabuf_v1);
   ]
 
-let make_registry ~xwayland ?override_dev t reg =
+let make_registry ~xwayland t reg =
   let registry =
     registry |> List.concat_map (fun (module M : Metadata.S) ->
         match Registry.get t.host.registry M.interface with
@@ -1443,7 +1444,7 @@ let make_registry ~xwayland ?override_dev t reg =
       | Zxdg_decoration_manager_v1.T -> make_xdg_decoration_manager bind proxy
       | Zwp_relative_pointer_manager_v1.T -> make_relative_pointer_manager bind proxy
       | Zwp_pointer_constraints_v1.T -> make_pointer_constraints bind proxy
-      | Zwp_linux_dmabuf_v1.T -> Linux_dmabuf.make_linux_dmabuf ?override_dev bind proxy
+      | Zwp_linux_dmabuf_v1.T -> Linux_dmabuf.make_linux_dmabuf ~virtio_gpu:t.host.virtio_gpu bind proxy
       | _ -> Fmt.failwith "Invalid service name for %a" Proxy.pp proxy
   end;
   registry |> Array.iteri (fun name (_, entry) ->
@@ -1451,14 +1452,14 @@ let make_registry ~xwayland ?override_dev t reg =
       C.Wl_registry.global reg ~name:(Int32.of_int name) ~interface:M.interface ~version
     )
 
-let run ?xwayland ~config ?override_dev host client =
+let run ?xwayland ~config host client =
   let t = { host; config } in
   let client_transport = Wayland.Unix_transport.of_socket client in
   Switch.run (fun sw ->
       let s =
         Server.connect ~sw client_transport ~trace:(module Trace.Client) @@ object
           inherit [_] C.Wl_display.v1
-          method on_get_registry _ ref = make_registry ~xwayland ?override_dev t ref
+          method on_get_registry _ ref = make_registry ~xwayland t ref
           method on_sync _ cb =
             Proxy.Handler.attach cb @@ new C.Wl_callback.v1;
             let h : _ Proxy.t = H.Wl_display.sync (Client.wl_display host.display) @@ object

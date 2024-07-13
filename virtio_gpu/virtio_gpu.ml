@@ -111,7 +111,7 @@ let find_device ~sw dri_dir =
 
 let close t = Dev.close t.dev
 
-let alloc t = Dev.alloc t.dev
+let alloc t ~gpu query = Dev.alloc t.dev ~gpu query
 
 let wayland_transport t = t.transport
 

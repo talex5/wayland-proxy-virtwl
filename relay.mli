@@ -43,7 +43,6 @@ type xwayland_hooks = <
 
 val run : ?xwayland:xwayland_hooks
        -> config:Config.t
-       -> ?override_dev:string
        -> Host.t
        -> _ Eio_unix.Net.stream_socket
        -> unit

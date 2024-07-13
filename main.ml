@@ -37,8 +37,8 @@ let listen_wayland ~sw ~net ~connect_host ~config ~wayland_socket wayland_displa
           Log.info (fun f -> f "New connection from %a" Eio.Net.Sockaddr.pp addr);
           try
             Switch.run @@ fun sw ->
-            let (host, override_dev) = connect_host ~sw in
-            Relay.run ~config ?override_dev host conn;
+            let host = connect_host ~sw in
+            Relay.run ~config host conn;
             (* The virtio transport doesn't support shutdown,
                so force host listen fiber to be cancelled now. *)
             Switch.fail sw Exit
@@ -94,13 +94,13 @@ let main ~env setup_tracing use_virtio_gpu wayland_display x_display config args
       match Virtio_gpu.find_device ~sw dri_dir with
       | Ok virtio_gpu ->
         let transport = Virtio_gpu.wayland_transport virtio_gpu in
-        (Host.connect ~virtio_gpu ~sw transport, Some (Virtio_gpu.device_string virtio_gpu))
+        Host.connect ~virtio_gpu ~sw transport
       | Error (`Msg m) ->
         Fmt.epr "No virtio-gpu device: %s@." m;
         exit 1
     ) else (
       let transport = Wayland.Unix_transport.connect ~sw ~net () in
-      (Host.connect ~sw transport, None)
+      Host.connect ~sw transport
     )
   in
   (* Listen for incoming Wayland client connections: *)

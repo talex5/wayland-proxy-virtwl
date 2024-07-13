@@ -1008,7 +1008,7 @@ let quiet_logging () =
 let handle_xwayland ~config ~local_wayland ~local_wm_socket ~connect_host =
   Switch.run @@ fun sw ->
   let x11 = Fiber.fork_promise ~sw (fun () -> X11.Display.connect ~sw local_wm_socket) in
-  let (host, _): Host.t * string option = connect_host ~sw in
+  let host: Host.t = connect_host ~sw in
   let wm_base = Wayland.Registry.bind host.registry @@ object
       inherit [_] Xdg_wm_base.v1
       method on_ping = Xdg_wm_base.pong

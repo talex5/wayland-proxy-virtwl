@@ -40,6 +40,7 @@ type t = {
   mutable pipe_of_id : pipe Res_handle.Map.t;
   mutable last_pipe_id : Res_handle.t;
   alloc_cache : (query, image_template) Hashtbl.t;
+  dev_string: string;
 }
 
 let is_closed t =
@@ -153,21 +154,21 @@ let of_fd ~sw fd =
       pipe_of_id = Res_handle.Map.empty;
       last_pipe_id = Res_handle.pipe_read_start;
       alloc_cache = Hashtbl.create 100;
+      dev_string = drm_get_dev unix_fd;
     }
   )
 
-let get_dev_string t =
-  Eio_unix.Fd.use_exn "get_dev_string" (get_dev t) drm_get_dev
+let get_dev_string t = t.dev_string
 
 (* Each time we query crosvm, it allocates a new resource which is never freed (while the device is open).
    So cache every response. *)
-let query_image t query =
+let query_image t ~gpu query =
   match Hashtbl.find_opt t.alloc_cache query with
   | Some x -> x
   | None ->
     let cs = Cross_domain_image_requirements.create
-        ~linear:true
-        ~scanout:true
+        ~linear:gpu
+        ~scanout:gpu
         ~width:query.width
         ~height:query.height
         ~drm_format:query.drm_format
@@ -181,10 +182,10 @@ let query_image t query =
     Hashtbl.add t.alloc_cache query cached;
     cached
 
-let alloc t query =
+let alloc t ~gpu query =
   let dev = get_dev t in
   Eio_unix.Fd.use_exn "alloc" dev @@ fun dev ->
-  let details = query_image t query in 
+  let details = query_image t ~gpu query in
   Log.info (fun f -> f "alloc: strides = %ld, offsets = %ld, host_size = %Ld, blob_id = %a"
                details.stride0 details.offset0 details.host_size Res_handle.pp details.template_id);
   let bo_handle, _ = create_blob dev (`Host3D details.template_id) ~size:details.host_size ~mappable:true ~shareable:true in
