@@ -769,7 +769,7 @@ let make_shm ~virtio_gpu bind c =
     method on_release = delete_with H.Wl_shm.release h
   end
 
-let make_linux_dmabuf ?(override_dev:string option) bind c =
+module Linux_dmabuf = struct
   let make_linux_buffer_params ~host_linux_buffer_params c =
     let proxy = cv c in
     let make_dma_buffer ~client_buffer h =
@@ -806,7 +806,7 @@ let make_linux_dmabuf ?(override_dev:string option) bind c =
       method on_add _ ~fd ~plane_idx ~offset ~stride ~modifier_hi ~modifier_lo =
         H.Zwp_linux_buffer_params_v1.add h ~fd ~plane_idx ~offset ~stride ~modifier_hi ~modifier_lo
     end
-  in
+
   let make_linux_dmabuf_feedback ?override_dev ~host_dmabuf_feedback c =
     let proxy = cv c in
     let h = host_dmabuf_feedback @@ object
@@ -827,27 +827,29 @@ let make_linux_dmabuf ?(override_dev:string option) bind c =
       inherit [_] C.Zwp_linux_dmabuf_feedback_v1.v1
       method on_destroy = delete_with H.Zwp_linux_dmabuf_feedback_v1.destroy h
     end
-  in
-  let h = bind @@ object
-      inherit [_] H.Zwp_linux_dmabuf_v1.v1
-      method on_format _ ~format = C.Zwp_linux_dmabuf_v1.format c ~format
-      method on_modifier _ ~format ~modifier_hi ~modifier_lo =
-        C.Zwp_linux_dmabuf_v1.modifier c ~format ~modifier_hi ~modifier_lo
+
+  let make_linux_dmabuf ?(override_dev:string option) bind c =
+    let h = bind @@ object
+        inherit [_] H.Zwp_linux_dmabuf_v1.v1
+        method on_format _ ~format = C.Zwp_linux_dmabuf_v1.format c ~format
+        method on_modifier _ ~format ~modifier_hi ~modifier_lo =
+          C.Zwp_linux_dmabuf_v1.modifier c ~format ~modifier_hi ~modifier_lo
+      end
+    in
+    Proxy.Handler.attach c @@ object
+      inherit [_] C.Zwp_linux_dmabuf_v1.v1
+      method on_destroy = delete_with H.Zwp_linux_dmabuf_v1.destroy h
+      method on_create_params _ params_id =
+        let host_linux_buffer_params = H.Zwp_linux_dmabuf_v1.create_params h in
+        make_linux_buffer_params ~host_linux_buffer_params params_id
+      method on_get_surface_feedback _ id ~surface =
+        let host_dmabuf_feedback = H.Zwp_linux_dmabuf_v1.get_surface_feedback h ~surface:(to_host surface) in
+        make_linux_dmabuf_feedback ?override_dev ~host_dmabuf_feedback id
+      method on_get_default_feedback _ id =
+        let host_dmabuf_feedback = H.Zwp_linux_dmabuf_v1.get_default_feedback h in
+        make_linux_dmabuf_feedback ?override_dev ~host_dmabuf_feedback id
     end
-  in
-  Proxy.Handler.attach c @@ object
-    inherit [_] C.Zwp_linux_dmabuf_v1.v1
-    method on_destroy = delete_with H.Zwp_linux_dmabuf_v1.destroy h
-    method on_create_params _ params_id =
-      let host_linux_buffer_params = H.Zwp_linux_dmabuf_v1.create_params h in
-      make_linux_buffer_params ~host_linux_buffer_params params_id
-    method on_get_surface_feedback _ id ~surface =
-      let host_dmabuf_feedback = H.Zwp_linux_dmabuf_v1.get_surface_feedback h ~surface:(to_host surface) in
-      make_linux_dmabuf_feedback ?override_dev ~host_dmabuf_feedback id
-    method on_get_default_feedback _ id =
-      let host_dmabuf_feedback = H.Zwp_linux_dmabuf_v1.get_default_feedback h in
-      make_linux_dmabuf_feedback ?override_dev ~host_dmabuf_feedback id
-  end
+end
 
 let make_popup ~host_popup c =
   let h = host_popup @@ object
@@ -1441,7 +1443,7 @@ let make_registry ~xwayland ?override_dev t reg =
       | Zxdg_decoration_manager_v1.T -> make_xdg_decoration_manager bind proxy
       | Zwp_relative_pointer_manager_v1.T -> make_relative_pointer_manager bind proxy
       | Zwp_pointer_constraints_v1.T -> make_pointer_constraints bind proxy
-      | Zwp_linux_dmabuf_v1.T -> make_linux_dmabuf ?override_dev bind proxy
+      | Zwp_linux_dmabuf_v1.T -> Linux_dmabuf.make_linux_dmabuf ?override_dev bind proxy
       | _ -> Fmt.failwith "Invalid service name for %a" Proxy.pp proxy
   end;
   registry |> Array.iteri (fun name (_, entry) ->
