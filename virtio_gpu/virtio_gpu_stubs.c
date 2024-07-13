@@ -148,6 +148,8 @@ CAMLprim value ocaml_drm_exec_buffer(value v_fd, value v_cmd, value v_ring_idx, 
     exec.num_bo_handles = n_handles;
     for (int i = 0; i < n_handles; i++) {
       handles[i] = Int32_val(Field(v_handles, i));
+      if (handles[i] < 0)
+        caml_invalid_argument("Negative handle value");
       // printf("handle[%d] = %d\n", i, handles[i]);
     }
   }
