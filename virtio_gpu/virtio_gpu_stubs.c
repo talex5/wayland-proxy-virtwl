@@ -333,6 +333,37 @@ CAMLprim value ocaml_drm_get_dev(value v)
   CAMLreturn(caml_alloc_initialized_string(sizeof(dev), (const char *)&dev));
 }
 
+// The non-OCaml-specific parts of this part are from ChromiumOS;
+// see NOTICE.
+CAMLprim value ocaml_fixup_strides(value prime_fd, value drm_fd_) {
+  CAMLparam2(prime_fd, drm_fd_);
+  CAMLlocal4(stride, modifier_hi, modifier_lo, out);
+  int drm_fd = Int_val(drm_fd_);
+  struct drm_prime_handle prime_handle = { .fd = Int_val(prime_fd) };
+  if (drmIoctl(drm_fd, DRM_IOCTL_PRIME_FD_TO_HANDLE, &prime_handle)) {
+    // Do not throw an exception here.
+    CAMLreturn(Val_unit);
+  }
+  struct drm_virtgpu_resource_info_cros info_arg = {
+    .bo_handle = prime_handle.handle,
+    .type = VIRTGPU_RESOURCE_INFO_TYPE_EXTENDED,
+  };
+  int ret = drmIoctl(drm_fd, DRM_IOCTL_VIRTGPU_RESOURCE_INFO_CROS, &info_arg);
+  struct drm_gem_close gem_close = { .handle = prime_handle.handle };
+  drmIoctl(drm_fd, DRM_IOCTL_GEM_CLOSE, &gem_close);
+  if (ret != 0 || info_arg.stride == 0) {
+    CAMLreturn(Val_unit);
+  }
+  stride = caml_copy_int32(info_arg.stride);
+  modifier_hi = caml_copy_int32(info_arg.format_modifier >> 32);
+  modifier_lo = caml_copy_int32(info_arg.format_modifier & 0xFFFFFFFFUL);
+  out = caml_alloc_small(3, 0);
+  Field(out, 0) = stride;
+  Field(out, 1) = modifier_hi;
+  Field(out, 2) = modifier_lo;
+  CAMLreturn(out);
+}
+
 CAMLprim value ocaml_ba_unmap(value v)
 {
   CAMLparam1(v);

@@ -10,6 +10,8 @@ type t = {
   transport : transport;
 }
 
+let get_dev t = Dev.get_dev t.dev
+
 let wayland_transport dev conn : #Wayland.S.transport =
   object
     val mutable up = true

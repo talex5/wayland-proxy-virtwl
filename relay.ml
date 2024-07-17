@@ -799,7 +799,12 @@ let make_shm ~virtio_gpu bind c =
   end
 
 module Linux_dmabuf = struct
-  let make_linux_buffer_params ~host_linux_buffer_params c =
+  type[@warning "-37"] stride =
+    | No_stride
+    | Stride of int32 * int32 * int32
+  external fixup_strides: Unix.file_descr -> Unix.file_descr -> stride =
+    "ocaml_fixup_strides"
+  let make_linux_buffer_params ~drm_fd ~host_linux_buffer_params c =
     let proxy = cv c in
     let make_dma_buffer ~client_buffer h =
       let c = client_buffer @@ object
@@ -817,11 +822,18 @@ module Linux_dmabuf = struct
       method on_created _ buffer = make_dma_buffer ~client_buffer:(C.Zwp_linux_buffer_params_v1.created proxy) buffer
     end
     in
-    let expected_plain_idx = ref 0l in
     Proxy.Handler.attach proxy @@ object
+      val mutable created = false
+      val mutable have_modifiers = false
+      val mutable modifier_lo_ = 0l
+      val mutable modifier_hi_ = 0l
       inherit [_] C.Zwp_linux_buffer_params_v1.v1
       method on_destroy = delete_with H.Zwp_linux_buffer_params_v1.destroy h
       method on_create_immed _ buffer ~width ~height ~format ~flags =
+        (* FIXME protocol error *)
+        (if created then failwith "Already created");
+        (if not have_modifiers then failwith "No planes");
+        created <- true;
         V.check_width_height_int32 ~width ~height;
         let host_buffer = H.Zwp_linux_buffer_params_v1.create_immed h ~width ~height ~format ~flags @@ object
           inherit [_] H.Wl_buffer.v1
@@ -833,20 +845,40 @@ module Linux_dmabuf = struct
           method on_destroy = delete_with H.Wl_buffer.destroy host_buffer
         end
       method on_create _ ~width ~height ~format ~flags =
+        (* FIXME protocol error *)
+        (if created then failwith "Already created");
+        (if not have_modifiers then failwith "No planes");
+        created <- true;
         V.check_width_height_int32 ~width ~height;
         H.Zwp_linux_buffer_params_v1.create h ~width ~height ~format ~flags
       method on_add _ ~fd ~plane_idx ~offset ~stride ~modifier_hi ~modifier_lo =
-        (* We must fix up the buffer parameters *)
-        if plane_idx < 0l then (
-          failwith "Negative plane index"
-        ) else if !expected_plain_idx != plane_idx then (
-          failwith "Wrong plane index"
-        ) else if offset < 0l then (
-          failwith "Negative offset"
+        (* FIXME protocol error *)
+        (if created then failwith "Already created");
+        if have_modifiers then (
+          if (modifier_lo <> modifier_lo_) || (modifier_hi <> modifier_hi_) then
+            failwith "Modifier mismatch"
         ) else (
-          (* FIXME: check offset and stride *)
-          H.Zwp_linux_buffer_params_v1.add h ~fd ~plane_idx ~offset ~stride ~modifier_hi ~modifier_lo
-        )
+          modifier_lo_ <- modifier_lo;
+          modifier_hi_ <- modifier_hi
+        );
+        (* We must fix up the buffer parameters *)
+        let (stride, modifier_hi, modifier_lo) =
+          if plane_idx < 0l then (
+            failwith "Negative plane index"
+          ) else if offset < 0l then (
+            failwith "Negative offset"
+          ) else if plane_idx = 0l then (
+            match drm_fd with
+            | None -> (stride, modifier_hi, modifier_lo)
+            | Some drm_fd -> (
+               match Eio_unix.Fd.use_exn "stride fixup" drm_fd (fixup_strides fd) with
+               | No_stride -> (stride, modifier_hi, modifier_lo)
+               | Stride (stride, modifier_hi, modifier_lo) -> (stride, modifier_hi, modifier_lo)
+            )
+          ) else (stride, modifier_hi, modifier_lo) in
+        (* Validation of these parameters is handled by the kernel driver, which is
+           assumed trusted and secure against malicious input. *)
+        H.Zwp_linux_buffer_params_v1.add h ~fd ~plane_idx ~offset ~stride ~modifier_hi ~modifier_lo
     end
 
   let make_linux_dmabuf_feedback ?override_dev ~host_dmabuf_feedback c =
@@ -871,7 +903,6 @@ module Linux_dmabuf = struct
     end
 
   let make_linux_dmabuf ~(virtio_gpu:Virtio_gpu.t option) bind c =
-    let override_dev = Option.map Virtio_gpu.device_string virtio_gpu in
     let h = bind @@ object
         inherit [_] H.Zwp_linux_dmabuf_v1.v1
         method on_format _ ~format = C.Zwp_linux_dmabuf_v1.format c ~format
@@ -880,11 +911,14 @@ module Linux_dmabuf = struct
       end
     in
     Proxy.Handler.attach c @@ object
+      val override_dev = Option.map Virtio_gpu.device_string virtio_gpu
+      val h = h
+      val drm_fd = Option.map Virtio_gpu.get_dev virtio_gpu
       inherit [_] C.Zwp_linux_dmabuf_v1.v1
       method on_destroy = delete_with H.Zwp_linux_dmabuf_v1.destroy h
       method on_create_params _ params_id =
         let host_linux_buffer_params = H.Zwp_linux_dmabuf_v1.create_params h in
-        make_linux_buffer_params ~host_linux_buffer_params params_id
+        make_linux_buffer_params ~drm_fd ~host_linux_buffer_params params_id
       method on_get_surface_feedback _ id ~surface =
         let host_dmabuf_feedback = H.Zwp_linux_dmabuf_v1.get_surface_feedback h ~surface:(to_host surface) in
         make_linux_dmabuf_feedback ?override_dev ~host_dmabuf_feedback id

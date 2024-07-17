@@ -23,4 +23,7 @@ val alloc : t -> gpu:bool -> Dev.query -> Dev.image
 (** [alloc t query] allocates a buffer matching [query] on the host and returns a handle to it.
     Use {!Utils.safe_map_file} to map it. *)
 
+val get_dev : t -> Eio_unix.Fd.t
+(** [fd t] returns the underlying file descriptor *)
+
 module Utils = Utils
