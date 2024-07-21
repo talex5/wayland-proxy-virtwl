@@ -194,16 +194,15 @@ let to_host (type a) (c : (a, 'v, [`Server]) Proxy.t) : (a, 'v, [`Client]) Proxy
 module V = struct
   let max_window_width_int32 = 16384l
   let max_window_height_int32 = 6144l
-  let check_width_height_int32 ~width ~height =
-    (* FIXME: proper protocol errors *)
+  let check_width_height_int32 t raise ~width ~height =
     if width <= 0l then (
-      failwith "Width is negative or 0"
+      raise t ~message:"Width is negative or 0"
     ) else if width > max_window_width_int32 then (
-      failwith "Width is excessive"
+      raise t ~message:"Width is excessive"
     ) else if height <= 0l then (
-      failwith "Height is negative or 0"
+      raise t ~message:"Height is negative or 0"
     ) else if height > max_window_height_int32 then (
-      failwith "Height is excessive"
+      raise t ~message:"Height is excessive"
     ) else (
       ()
     )
@@ -280,12 +279,18 @@ module Shm : sig
 
   val map_buffer : 'v CD.virtwl_buffer Lazy.t -> 'v CD.virtwl_buffer
   (** [map_buffer user_data] is used by the surface when attaching the buffer. *)
+
+  val shm_pool_invalid_stride : ([`Wl_shm_pool], [>`V1], [`Server]) Proxy.t -> message:string -> 'a
+  (** [shm_pool_invalid_stride] disconnects the client with an invalid_stride error *)
 end = struct
   type mapping = {
     host_pool : [`V1|`V2] H.Wl_shm_pool.t;
     client_memory_pool : Cstruct.buffer;   (* The client's memory mapped into our address space *)
     host_memory_pool : Cstruct.buffer;     (* The host's memory mapped into our address space *)
   }
+
+  let shm_pool_invalid_stride proxy =
+    Proxy.post_error proxy ~code:1l ~message:"Invalid pool stride, size, or offset"
 
   type t = {
     host_shm : [`V1|`V2] H.Wl_shm.t;
@@ -366,7 +371,7 @@ end = struct
 
   let create_buffer t ~offset ~width ~height ~stride ~format buffer : buffer =
     (* FIXME: check that stride is valid for format, width, height, and offset *)
-    V.check_width_height_int32 ~width ~height;
+    V.check_width_height_int32 buffer shm_pool_invalid_stride ~width ~height;
     assert (t.ref_count > 0);   (* The shm_pool proxy must exist to call this. *)
     (* FIXME: check reference count overflow *)
     t.ref_count <- t.ref_count + 1;
@@ -473,17 +478,20 @@ let make_surface ~xwayland ~host_surface c =
       Cstruct.blit data.client_memory 0 data.host_memory 0 (Cstruct.length data.client_memory);
       H.Wl_surface.commit h
 
-    method on_damage _ ~x ~y ~width ~height =
+    method on_damage p ~x ~y ~width ~height =
       (* FIXME: bounds check *)
-      V.check_width_height_int32 ~width ~height;
+      V.check_width_height_int32 p C.Wl_surface.Errors.invalid_offset
+        ~width ~height;
       when_configured @@ fun () ->
       let (x, y) = scale_to_host ~xwayland (x, y) in
       let (width, height) = scale_to_host ~xwayland (width, height) in
       H.Wl_surface.damage h ~x ~y ~width ~height
 
-    method on_damage_buffer _ ~x ~y ~width ~height =
-      (* FIXME: bounds check *)
-      V.check_width_height_int32 ~width ~height;
+    method on_damage_buffer p ~x ~y ~width ~height =
+      (* FIXME: bounds check properly by knowing the actual dimensions *)
+      V.check_width_height_int32 p C.Wl_surface.Errors.invalid_offset
+        ~width ~height;
+
       when_configured @@ fun () ->
       H.Wl_surface.damage_buffer h ~x ~y ~width ~height
 
@@ -602,9 +610,10 @@ let make_shm_pool_virtwl ~virtio_gpu ~host_shm proxy ~fd:client_fd ~size:orig_si
   Proxy.Handler.attach proxy @@ object
     inherit [_] C.Wl_shm_pool.v1
 
-    method on_create_buffer _ buffer ~offset ~width ~height ~stride ~format =
+    method on_create_buffer p buffer ~offset ~width ~height ~stride ~format =
       (* FIXME: check parameters *)
-      V.check_width_height_int32 ~width ~height;
+      V.check_width_height_int32 p Shm.shm_pool_invalid_stride ~width ~height;
+      (* FIXME: check that offset is valid for width, height, or stride *)
       let b = Shm.create_buffer mapping ~offset ~width ~height ~stride ~format buffer in
       make_shm_buffer b buffer
 
@@ -617,8 +626,8 @@ let make_shm_pool_direct host_pool proxy =
   Proxy.Handler.attach proxy @@ object
     inherit [_] C.Wl_shm_pool.v1
 
-    method on_create_buffer _ buffer ~offset ~width ~height ~stride ~format =
-      V.check_width_height_int32 ~width ~height;
+    method on_create_buffer p buffer ~offset ~width ~height ~stride ~format =
+      V.check_width_height_int32 p Shm.shm_pool_invalid_stride ~width ~height;
       let host_buffer = H.Wl_shm_pool.create_buffer host_pool ~offset ~width ~height ~stride ~format @@ object
           inherit [_] H.Wl_buffer.v1
           method on_release _ = C.Wl_buffer.release buffer
@@ -822,6 +831,15 @@ module Linux_dmabuf = struct
       method on_created _ buffer = make_dma_buffer ~client_buffer:(C.Zwp_linux_buffer_params_v1.created proxy) buffer
     end
     in
+    let check_used t created =
+      if created then
+        C.Zwp_linux_buffer_params_v1.Errors.already_used ~message:"Already created" t
+      else
+        true
+    in
+    let check_complete t complete =
+      if not complete then C.Zwp_linux_buffer_params_v1.Errors.incomplete ~message:"No planes" t
+    in
     Proxy.Handler.attach proxy @@ object
       val mutable created = false
       val mutable have_modifiers = false
@@ -829,12 +847,10 @@ module Linux_dmabuf = struct
       val mutable modifier_hi_ = 0l
       inherit [_] C.Zwp_linux_buffer_params_v1.v1
       method on_destroy = delete_with H.Zwp_linux_buffer_params_v1.destroy h
-      method on_create_immed _ buffer ~width ~height ~format ~flags =
-        (* FIXME protocol error *)
-        (if created then failwith "Already created");
-        (if not have_modifiers then failwith "No planes");
-        created <- true;
-        V.check_width_height_int32 ~width ~height;
+      method on_create_immed t buffer ~width ~height ~format ~flags =
+        created <- check_used t created;
+        check_complete t have_modifiers;
+        V.check_width_height_int32 t C.Zwp_linux_buffer_params_v1.Errors.invalid_dimensions ~width ~height;
         let host_buffer = H.Zwp_linux_buffer_params_v1.create_immed h ~width ~height ~format ~flags @@ object
           inherit [_] H.Wl_buffer.v1
           method on_release _ = C.Wl_buffer.release buffer
@@ -844,19 +860,16 @@ module Linux_dmabuf = struct
           method! user_data = client_data (Buffer (`Direct host_buffer))
           method on_destroy = delete_with H.Wl_buffer.destroy host_buffer
         end
-      method on_create _ ~width ~height ~format ~flags =
-        (* FIXME protocol error *)
-        (if created then failwith "Already created");
-        (if not have_modifiers then failwith "No planes");
-        created <- true;
-        V.check_width_height_int32 ~width ~height;
+      method on_create t ~width ~height ~format ~flags =
+        created <- check_used t created;
+        check_complete t have_modifiers;
+        V.check_width_height_int32 t C.Zwp_linux_buffer_params_v1.Errors.invalid_dimensions ~width ~height;
         H.Zwp_linux_buffer_params_v1.create h ~width ~height ~format ~flags
-      method on_add _ ~fd ~plane_idx ~offset ~stride ~modifier_hi ~modifier_lo =
-        (* FIXME protocol error *)
-        (if created then failwith "Already created");
+      method on_add t ~fd ~plane_idx ~offset ~stride ~modifier_hi ~modifier_lo =
+        check_used t created |> ignore;
         if have_modifiers then (
           if (modifier_lo <> modifier_lo_) || (modifier_hi <> modifier_hi_) then
-            failwith "Modifier mismatch"
+            C.Zwp_linux_buffer_params_v1.Errors.invalid_format ~message:"Modifier mismatch" t
         ) else (
           modifier_lo_ <- modifier_lo;
           modifier_hi_ <- modifier_hi
@@ -864,9 +877,11 @@ module Linux_dmabuf = struct
         (* We must fix up the buffer parameters *)
         let (stride, modifier_hi, modifier_lo) =
           if plane_idx < 0l then (
-            failwith "Negative plane index"
+            C.Zwp_linux_buffer_params_v1.Errors.plane_idx ~message:"Negative plane index" t
           ) else if offset < 0l then (
-            failwith "Negative offset"
+            C.Zwp_linux_buffer_params_v1.Errors.out_of_bounds ~message:"Negative offset" t
+          ) else if plane_idx >= 4l then (
+            C.Zwp_linux_buffer_params_v1.Errors.plane_idx ~message:(Format.asprintf "Excessive plane index %ld" plane_idx) t
           ) else if plane_idx = 0l then (
             match drm_fd with
             | None -> (stride, modifier_hi, modifier_lo)
@@ -1061,9 +1076,7 @@ let make_zxdg_output ~xwayland ~host_xdg_output c =
         C.Zxdg_output_v1.logical_position c ~x ~y
 
       method on_logical_size _ ~width ~height =
-        V.check_width_height_int32 ~width ~height;
         let (width, height) = scale_to_client ~xwayland (width, height) in
-        V.check_width_height_int32 ~width ~height;
         C.Zxdg_output_v1.logical_size c ~width ~height
 
       method on_name _ = C.Zxdg_output_v1.name c
