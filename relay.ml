@@ -893,7 +893,8 @@ module Linux_dmabuf = struct
           ) else (stride, modifier_hi, modifier_lo) in
         (* Validation of these parameters is handled by the kernel driver, which is
            assumed trusted and secure against malicious input. *)
-        H.Zwp_linux_buffer_params_v1.add h ~fd ~plane_idx ~offset ~stride ~modifier_hi ~modifier_lo
+        H.Zwp_linux_buffer_params_v1.add h ~fd ~plane_idx ~offset ~stride ~modifier_hi ~modifier_lo;
+        have_modifiers <- true
     end
 
   let make_linux_dmabuf_feedback ?override_dev ~host_dmabuf_feedback c =
