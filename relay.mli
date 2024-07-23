@@ -42,6 +42,7 @@ type xwayland_hooks = <
 >
 
 val run : ?xwayland:xwayland_hooks
+       -> error_callback:Wayland.Client.error_callback option ref
        -> config:Config.t
        -> Host.t
        -> _ Eio_unix.Net.stream_socket

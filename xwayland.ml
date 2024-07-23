@@ -1005,10 +1005,16 @@ let quiet_logging () =
 
 (* We've just spawned an Xwayland process.
    Talk to it using the Wayland and X11 protocols. *)
-let handle_xwayland ~config ~local_wayland ~local_wm_socket ~connect_host =
+let handle_xwayland ~config ~local_wayland ~local_wm_socket ~(connect_host:(error_callback:Wayland.Client.error_callback -> sw:Eio.Switch.t -> Host.t)) =
   Switch.run @@ fun sw ->
+  let error_callback = ref None in
+  let propagate_error ~object_id ~code ~message =
+    match !error_callback with
+    | None -> ()
+    | Some cb -> cb ~object_id ~code ~message
+  in
   let x11 = Fiber.fork_promise ~sw (fun () -> X11.Display.connect ~sw local_wm_socket) in
-  let host: Host.t = connect_host ~sw in
+  let host: Host.t = connect_host ~sw ~error_callback:propagate_error in
   let wm_base = Wayland.Registry.bind host.registry @@ object
       inherit [_] Xdg_wm_base.v1
       method on_ping = Xdg_wm_base.pong
@@ -1081,12 +1087,12 @@ let handle_xwayland ~config ~local_wayland ~local_wm_socket ~connect_host =
   end in
   let xrdb = String.concat "\n" config.xrdb in
   Fiber.all [
-    (fun () -> Relay.run ~config ~xwayland host local_wayland);
+    (fun () -> Relay.run ~error_callback ~config ~xwayland host local_wayland);
     (fun () -> listen_x11 ~selection t);
     (fun () -> initialise_x ~xrdb ~selection t);
   ]
 
-let spawn_and_run_xwayland ~proc_mgr ~config ~connect_host ~display listen_socket =
+let spawn_and_run_xwayland ~proc_mgr ~config ~(connect_host:(error_callback:Wayland.Client.error_callback -> sw:Eio.Switch.t -> Host.t)) ~display listen_socket =
   Switch.run @@ fun sw ->
   (* Set up connections between us and Xwayland: *)
   let local_wm_socket, remote_wm_socket = Eio_unix.Net.socketpair_stream ~sw () in

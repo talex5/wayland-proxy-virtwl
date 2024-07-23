@@ -9,8 +9,8 @@ type t = {
 
 (* Spawn a fiber talking the Wayland protocol over [transport].
    [sw] will fail if a protocol error occurs. *)
-let connect ?virtio_gpu ~sw transport =
-  let display = Wayland.Client.connect ~sw ~trace:(module Trace.Host) transport in
+let connect ?error_callback ?virtio_gpu ~sw transport =
+  let display = Wayland.Client.connect ~sw ~trace:(module Trace.Host) ?error_callback transport in
   let registry = Wayland.Registry.of_display display in
   let _dma =
     virtio_gpu |> Option.map @@ fun _ ->

@@ -37,8 +37,13 @@ let listen_wayland ~sw ~net ~connect_host ~config ~wayland_socket wayland_displa
           Log.info (fun f -> f "New connection from %a" Eio.Net.Sockaddr.pp addr);
           try
             Switch.run @@ fun sw ->
-            let host = connect_host ~sw in
-            Relay.run ~config host conn;
+            let error_callback = ref None in
+            let host =
+              let error_callback = fun ~object_id ~code ~message ->
+                match !error_callback with
+                  None -> () | Some cb -> cb ~object_id ~code ~message in
+              connect_host ~error_callback ~sw in
+            Relay.run ~error_callback ~config host conn;
             (* The virtio transport doesn't support shutdown,
                so force host listen fiber to be cancelled now. *)
             Switch.fail sw Exit
@@ -88,23 +93,24 @@ let main ~env setup_tracing use_virtio_gpu wayland_display x_display config args
   let* () = Sd_listen_fds.ensure_all_consumed () in
   let* wayland_display = get_wayland_display ?socket:wayland_socket wayland_display in
   setup_tracing ~wayland_display;
-  let connect_host ~sw =
+  let connect_host ~error_callback ~sw =
     if use_virtio_gpu then (
       let dri_dir = Virtio_gpu.default_dri_dir env#fs in
       match Virtio_gpu.find_device ~sw dri_dir with
       | Ok virtio_gpu ->
         let transport = Virtio_gpu.wayland_transport virtio_gpu in
-        Host.connect ~virtio_gpu ~sw transport
+        Host.connect ~error_callback ~virtio_gpu ~sw transport
       | Error (`Msg m) ->
         Fmt.epr "No virtio-gpu device: %s@." m;
         exit 1
     ) else (
       let transport = Wayland.Unix_transport.connect ~sw ~net () in
-      Host.connect ~sw transport
+      Host.connect ~error_callback ~sw transport
     )
   in
   (* Listen for incoming Wayland client connections: *)
-  let* () = listen_wayland ~sw ~net ~config ~connect_host ~wayland_socket wayland_display in
+  let* () = listen_wayland ~sw ~net ~config ~connect_host
+              ~wayland_socket wayland_display in
   (* Listen for incoming X11 client connections, if configured: *)
   let* () = listen_x11 ~sw ~net ~proc_mgr ~config ~connect_host ~x11_socket x_display in
   (* Run the application (if any), or just wait (if not): *)

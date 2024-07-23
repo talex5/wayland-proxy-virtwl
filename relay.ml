@@ -1544,7 +1544,7 @@ let make_registry ~xwayland t reg =
       C.Wl_registry.global reg ~name:(Int32.of_int name) ~interface:M.interface ~version
     )
 
-let run ?xwayland ~config host client =
+let run ?xwayland ~(error_callback:Wayland.Client.error_callback option ref) ~config host client =
   let t = { host; config } in
   let client_transport = Wayland.Unix_transport.of_socket client in
   Switch.run (fun sw ->
@@ -1563,7 +1563,16 @@ let run ?xwayland ~config host client =
             Proxy.on_delete h (fun () -> Proxy.delete cb)
         end
       in
-      ignore (s : Server.t)
+      let display = Server.wl_display s in
+      let cb ~object_id ~code ~message = (
+          let message = Format.asprintf
+            "Host compositor posted error: object %d, code %d, message %s"
+            (Int32.to_int object_id)
+            (Int32.to_int code)
+            message in
+          C.Wl_display.Errors.implementation display ~message) in
+      error_callback := Some cb
+
     );
   Log.info (fun f -> f "Client finished; closing host connection");
   Client.stop host.display
