@@ -351,7 +351,7 @@ CAMLprim value ocaml_fixup_strides(value prime_fd, value drm_fd_) {
   int ret = drmIoctl(drm_fd, DRM_IOCTL_VIRTGPU_RESOURCE_INFO_CROS, &info_arg);
   struct drm_gem_close gem_close = { .handle = prime_handle.handle };
   drmIoctl(drm_fd, DRM_IOCTL_GEM_CLOSE, &gem_close);
-  if (ret != 0 || info_arg.stride == 0) {
+  if (ret != 0 || info_arg.stride < 2) {
     CAMLreturn(Val_unit);
   }
   stride = caml_copy_int32(info_arg.stride);
