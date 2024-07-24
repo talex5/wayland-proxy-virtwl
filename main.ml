@@ -13,7 +13,9 @@ let is_listening path =
     Log.warn (fun f -> f "Error testing socket %S: %a" path Fmt.exn ex);
     false
 
-let on_error ex = Log.warn (fun f -> f "Error handling client: %a" Fmt.exn ex)
+let on_error ex =
+  let bt = Printexc.get_raw_backtrace () in
+  Log.err (fun f -> f "Error handling client: %a" Fmt.exn_backtrace (ex, bt))
 
 (* Start a daemon fiber listening for connections to [wayland_display]. *)
 let listen_wayland ~sw ~net ~connect_host ~config ~wayland_socket wayland_display = 
