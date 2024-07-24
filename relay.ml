@@ -1563,14 +1563,12 @@ let run ?xwayland ~(error_callback:Wayland.Client.error_callback option ref) ~co
             Proxy.on_delete h (fun () -> Proxy.delete cb)
         end
       in
-      let display = Server.wl_display s in
-      let cb ~object_id ~code ~message = (
-          let message = Format.asprintf
+      let cb ~object_id ~code ~message =
+          Server.implementation_error s @@ Format.asprintf
             "Host compositor posted error: object %d, code %d, message %s"
             (Int32.to_int object_id)
             (Int32.to_int code)
             message in
-          C.Wl_display.Errors.implementation display ~message) in
       error_callback := Some cb
 
     );
