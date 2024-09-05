@@ -1,0 +1,146 @@
+#include <stdint.h>
+#include <drm/drm_fourcc.h>
+
+/*   UINT32_MAX * UINT32_MAX + UINT32_MAX
+ * = (2**32 - 1)**2 + (2**32 - 1)
+ * = (2**64 - (2 * 2**32) + 1) + (2**32 - 1)
+ * = (2**64 - 1) - (2**32 - 1)
+ * < UINT64_MAX
+ * so this cannot overflow.
+ */
+static uint64_t mul_32_to_64(uint32_t a, uint32_t b)
+{
+  return (uint64_t)a * (uint64_t)b;
+}
+
+static uint32_t div_round_up(uint32_t num, uint32_t denom)
+{
+  if (denom < 1)
+    abort();
+  return (uint32_t)(((uint64_t)num + (uint64_t)denom - UINT64_C(1)) / denom);
+}
+
+bool validate_fd(long fd, uint32_t offset, int32_t width, int32_t height,
+		 uint32_t stride, uint32_t format, uint64_t modifiers,
+		 uint32_t plane_idx)
+{
+  if (width < 1 || height < 1 || width > 16384 || height > 6144 || stride > 65536) {
+    return false; /* too large */
+  }
+  if (fd < 0 || fd > INT_MAX) {
+    return false; /* junk FD */
+  }
+
+  off_t size = lseek((int)fd, 0, SEEK_END);
+  uint64_t size = (uint64_t)raw_size;
+  if (raw_size < 0 || (off_t)size != raw_size) {
+    return false; /* cannot validate */
+  }
+
+  if (offset > size) {
+    return false; /* offset out of bounds */
+  }
+
+  size -= offset;
+
+  struct drm_format_info *info = lookup_format(format);
+  if (info->is_color_indexed) {
+    return false; /* color index cannot be used */
+  }
+
+  if (plane_idx > info->num_planes) {
+    return false;
+  }
+
+  uint8_t block_size = info->char_per_block[plane_idx];
+  if (block_size < 1 || info->hsub < 1 || info->vsub < 1) {
+    assert(0); /* corrupt description */
+    return false;
+  }
+
+  if (stride % block_size != 0) {
+    return false; /* stride is not a multiple of block size */
+  }
+
+  uint32_t horizontal_blocks;
+  uint32_t vertical_blocks;
+  if (plane_idx > 0) {
+    horizontal_blocks = div_round_up((uint32_t)width, info->hsub);
+    vertical_blocks = div_round_up((uint32_t)height, info->vsub);
+  } else {
+    horizontal_blocks = (uint32_t)width;
+    vertical_blocks = (uint32_t)height;
+  }
+
+  if (mul_32_to_64(horizontal_blocks, block_size) > stride) {
+    return false; /* stride too small */
+  }
+
+  min_bytes = mul_32_to_64(vertical_blocks, stride);
+
+  if (min_bytes > (uint64_t)INT_MAX || min_bytes > (uint64_t)INT32_MAX) {
+    return false; /* too large */
+  }
+
+  if (min_bytes > size) {
+    return false; /* size too small */
+  }
+
+  return true;
+}
+
+bool
+validate_shm(int fd, int32_t offset, int32_t width, int32_t height,
+	     int32_t stride, uint32_t format)
+{
+  if (offset < 0 || stride < width) {
+    return false;
+  }
+
+  return validate_fd(fd, (uint32_t)offset, width, height, (uint32_t)stride, format, DRM_FORMAT_LINEAR, 0);
+}
+
+CAMLprim bool
+validate_shm_native(intnat fd, int32_t offset, int32_t width, int32_t height,
+		    int32_t stride, int32_t format)
+{
+  if (fd < 0 || fd > INT_MAX)
+    return false;
+  return validate_shm((int)fd, offset, width, height, stride, (uint32_t)format);
+}
+
+CAMLprim value
+validate_shm_byte(value *argv, int argc)
+{
+  return Val_bool(validate_shm_native(Long_val(argv[0]),
+				      Int32_val(argv[1]),
+				      Int32_val(argv[2]),
+				      Int32_val(argv[3]),
+				      Int32_val(argv[4]),
+				      Int32_val(argv[5])));
+}
+
+CAMLprim bool validate_fd_native(intnat fd, int32_t offset, int32_t width, int32_t height,
+				 int32_t stride, int32_t format, int64_t modifiers,
+				 int32_t plane_idx)
+{
+  if (fd < 0 || fd > INT_MAX)
+    return false;
+  return validate_fd((int)fd, (uint32_t)offset, width, height, stride,
+		     (uint32_t)format, (uint64_t)modifiers, (uint64_t)plane_idx);
+}
+
+CAMLprim value
+validate_fd_byte(value *argv, int argc)
+{
+  if (argc != 8)
+    caml_fatal_error("wrong arity");
+  return Val_bool(validate_fd_native((int)fd,
+				     (uint32_t)Int32_val(argv[1]),
+				     Int32_val(argv[2]),
+				     Int32_val(argv[3]),
+				     Int32_val(argv[4]),
+				     (uint32_t)Int32_val(argv[5]),
+				     (uint64_t)Int64_val(argv[6]),
+				     (uint32_t)Int32_val(argv[7]))));
+}
