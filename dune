@@ -1,5 +1,9 @@
 (executable
   (name main)
+  (foreign_stubs
+    (language c)
+    (names relay_stubs)
+    (flags (:standard)))
   (public_name wayland-proxy-virtwl)
   (preprocess (pps ppx_cstruct))
   (libraries wayland wayland.protocols virtio_gpu cmdliner fmt x11 eio_main))

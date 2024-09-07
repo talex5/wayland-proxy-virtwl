@@ -57,7 +57,7 @@ let alloc_shm t ~width ~height =
       ~width:(Int32.of_int width)
       ~height:(Int32.of_int height)
       ~stride:(Int32.of_int stride)
-      ~format:Wl_shm.Format.Xrgb8888
+      ~format:(Wl_shm.Format.to_int32 Wl_shm.Format.Xrgb8888)
     @@ object
       inherit [_] Wl_buffer.v1
       method on_release buffer =
