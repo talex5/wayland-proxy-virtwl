@@ -88,7 +88,7 @@ module HD = struct
     mutable data : surface_data;
   }
 
-  type 'a t = 
+  type 'a t =
     | Surface        : 'v surface                            -> [`Wl_surface]                     t
     | Data_offer     : 'v C.Wl_data_offer.t                  -> [`Wl_data_offer]                  t
     | Gtk_data_offer : 'v C.Gtk_primary_selection_offer.t    -> [`Zwp_primary_selection_offer_v1] t
@@ -142,7 +142,7 @@ end
 
 (* Note: the role here is our role: [`Server] data is attached to proxies to
  our clients (where we are the server), while [`Client] data is attached to host objects. *)
-type ('a, 'role) user_data = 
+type ('a, 'role) user_data =
   | Client_data      : 'a CD.t -> ('a, [`Server]) user_data
   | Host_data        : 'a HD.t -> ('a, [`Client]) user_data
 
@@ -428,7 +428,7 @@ end = struct
           @@ object
             inherit [_] H.Wl_buffer.v1
             method on_release _ = C.Wl_buffer.release buffer
-          end 
+          end
         in
         { CD.host_memory; client_memory; host_buffer }
       )
@@ -1414,7 +1414,7 @@ let make_data_source ~host_source c =
       (* TODO: validate that this source will only be used for drag-and-drop. *)
       (* TODO: validate that this request is made only once. *)
       (if untrusted_dnd_actions < 0l || untrusted_dnd_actions > 7l then
-        (* FIXME: protocol error *) assert false); 
+        (* FIXME: protocol error *) assert false);
       H.Wl_data_source.set_actions h ~dnd_actions:untrusted_dnd_actions
   end
 
@@ -1481,7 +1481,7 @@ module Gtk_primary = struct
 
         method on_receive c ~(untrusted_mime_type:string) ~(untrusted_fd:Unix.file_descr) =
           Fun.protect ~finally:(fun () -> Unix.close untrusted_fd)
-            (fun () -> 
+            (fun () ->
               let mime_type = validate_mime_type c ~untrusted_mime_type in
               let fd = validate_pipe c ~untrusted_fd in
               H.Zwp_primary_selection_offer_v1.receive h ~mime_type ~fd)
