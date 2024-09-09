@@ -206,6 +206,18 @@ module V = struct
     ) else (
       ()
     )
+  let check_max_width_height t raise ~untrusted_width ~untrusted_height =
+    if untrusted_width < 0l then (
+      raise t ~message:(Format.asprintf "Width %ld is negative" untrusted_width)
+    ) else if untrusted_width > max_window_width_int32 then (
+      raise t ~message:(Format.asprintf "Width %ld is excessive" untrusted_width)
+    ) else if untrusted_height < 0l then (
+      raise t ~message:(Format.asprintf "Height %ld is negative" untrusted_height)
+    ) else if untrusted_height > max_window_height_int32 then (
+      raise t ~message:(Format.asprintf "Height %ld is excessive" untrusted_height)
+    ) else (
+      ()
+    )
   let check_x_y t raise ~untrusted_x ~untrusted_y =
     check_width_height_int32 t raise ~untrusted_width:untrusted_x ~untrusted_height:untrusted_y
 end
@@ -1061,6 +1073,10 @@ let make_toplevel ~tag ~host_toplevel c =
   let user_data = client_data (Toplevel h) in
   Proxy.Handler.attach c @@ object
     val h = h
+    val mutable min_width = 0
+    val mutable min_height = 0
+    val mutable max_width = 0
+    val mutable max_height = 0
     inherit [_] C.Xdg_toplevel.v1
     method! user_data = user_data
     method on_destroy = delete_with H.Xdg_toplevel.destroy h
@@ -1074,15 +1090,37 @@ let make_toplevel ~tag ~host_toplevel c =
     method on_set_app_id _ ~(untrusted_app_id:string): unit =
       (* TODO: validate app ID *)
       H.Xdg_toplevel.set_app_id h ~app_id:untrusted_app_id
-    method on_set_fullscreen _ ~output = H.Xdg_toplevel.set_fullscreen h ~output:(Option.map to_host output)
+    method on_set_fullscreen _ ~output =
+      if false then
+        H.Xdg_toplevel.set_fullscreen h ~output:(Option.map to_host output)
+      else
+        H.Xdg_toplevel.set_maximized h
     method on_set_max_size p ~(untrusted_width:int32) ~(untrusted_height:int32): unit =
-      (* TODO: do not fail assertion *)
-      V.check_width_height_int32 p (fun p -> C.Xdg_toplevel.Errors.invalid_size p ~message:(Format.asprintf "Invalid width or height (%lux%lu)" untrusted_width untrusted_height)) ~untrusted_width ~untrusted_height;
-      H.Xdg_toplevel.set_max_size h ~width:untrusted_width ~height:untrusted_height
+      V.check_max_width_height p C.Xdg_toplevel.Errors.invalid_size ~untrusted_width ~untrusted_height;
+      let untrusted_width_int = Int32.to_int untrusted_width in
+      let untrusted_height_int = Int32.to_int untrusted_height in
+      (if min_width <> 0 && untrusted_width_int <> 0 && min_width > untrusted_width_int then
+        C.Xdg_toplevel.Errors.invalid_size p ~message:(
+            Format.asprintf "Max width %d less than min width %d" untrusted_width_int min_width));
+      (if min_height <> 0 && untrusted_height_int <> 0 && min_height > untrusted_height_int then
+        C.Xdg_toplevel.Errors.invalid_size p ~message:(
+            Format.asprintf "Max height %d less than min height %d" untrusted_height_int min_height));
+      max_width <- untrusted_width_int;
+      max_height <- untrusted_height_int;
+      H.Xdg_toplevel.set_min_size h ~width:untrusted_width ~height:untrusted_height;
     method on_set_maximized _ = H.Xdg_toplevel.set_maximized h
     method on_set_min_size p ~(untrusted_width:int32) ~(untrusted_height:int32): unit =
-      (* TODO: do not fail assertion *)
-      V.check_width_height_int32 p (fun _ -> assert false) ~untrusted_width ~untrusted_height;
+      V.check_max_width_height p C.Xdg_toplevel.Errors.invalid_size ~untrusted_width ~untrusted_height;
+      let untrusted_width_int = Int32.to_int untrusted_width in
+      let untrusted_height_int = Int32.to_int untrusted_height in
+      (if max_width <> 0 && untrusted_width_int <> 0 && max_width < untrusted_width_int then
+        C.Xdg_toplevel.Errors.invalid_size p ~message:(
+            Format.asprintf "Max width %d less than min width %d" max_width untrusted_width_int));
+      (if max_height <> 0 && untrusted_height_int <> 0 && max_height < untrusted_height_int then
+        C.Xdg_toplevel.Errors.invalid_size p ~message:(
+            Format.asprintf "Max height %d less than min height %d" max_height untrusted_height_int));
+      min_width <- untrusted_width_int;
+      min_height <- untrusted_height_int;
       H.Xdg_toplevel.set_min_size h ~width:untrusted_width ~height:untrusted_height
     method on_set_minimized _ = H.Xdg_toplevel.set_minimized h
     method on_set_parent _ ~parent = H.Xdg_toplevel.set_parent h ~parent:(Option.map to_host parent)
