@@ -219,7 +219,17 @@ module V = struct
       ()
     )
   let check_x_y t raise ~untrusted_x ~untrusted_y =
-    check_width_height_int32 t raise ~untrusted_width:untrusted_x ~untrusted_height:untrusted_y
+    if untrusted_x < Int32.sub 0l max_window_width_int32 then (
+      raise t ~message:(Format.asprintf "X %ld is too negative" untrusted_x)
+    ) else if untrusted_x > max_window_width_int32 then (
+      raise t ~message:(Format.asprintf "X %ld is excessive" untrusted_x)
+    ) else if untrusted_y < Int32.sub 0l max_window_height_int32 then (
+      raise t ~message:(Format.asprintf "Y %ld is too negative" untrusted_y)
+    ) else if untrusted_y > max_window_height_int32 then (
+      raise t ~message:(Format.asprintf "Y %ld is excessive" untrusted_y)
+    ) else (
+      ()
+    )
 end
 
 (* When the client asks to destroy something, delay the ack until the host object is destroyed.
@@ -1156,10 +1166,9 @@ let make_xdg_surface ~tag ~host_xdg_surface c =
              ~(untrusted_y:int32)
              ~(untrusted_width:int32)
              ~(untrusted_height:int32): unit =
-      V.check_width_height_int32 p (fun _ -> assert false) ~untrusted_width ~untrusted_height;
-      V.check_x_y p (fun _ -> assert false) ~untrusted_x ~untrusted_y;
+      V.check_width_height_int32 p C.Xdg_surface.Errors.invalid_size ~untrusted_width ~untrusted_height;
+      V.check_x_y p C.Xdg_surface.Errors.invalid_size ~untrusted_x ~untrusted_y;
 
-      (* TODO: validate geometry *)
       let (x, y, width, height) = (untrusted_x, untrusted_y, untrusted_width, untrusted_height) in
       H.Xdg_surface.set_window_geometry h ~x ~y ~width ~height
 
