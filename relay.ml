@@ -1077,7 +1077,7 @@ let make_toplevel ~tag ~host_toplevel c =
     method on_set_fullscreen _ ~output = H.Xdg_toplevel.set_fullscreen h ~output:(Option.map to_host output)
     method on_set_max_size p ~(untrusted_width:int32) ~(untrusted_height:int32): unit =
       (* TODO: do not fail assertion *)
-      V.check_width_height_int32 p (fun _ -> assert false) ~untrusted_width ~untrusted_height;
+      V.check_width_height_int32 p (fun p -> C.Xdg_toplevel.Errors.invalid_size p ~message:(Format.asprintf "Invalid width or height (%lux%lu)" untrusted_width untrusted_height)) ~untrusted_width ~untrusted_height;
       H.Xdg_toplevel.set_max_size h ~width:untrusted_width ~height:untrusted_height
     method on_set_maximized _ = H.Xdg_toplevel.set_maximized h
     method on_set_min_size p ~(untrusted_width:int32) ~(untrusted_height:int32): unit =
