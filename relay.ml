@@ -286,7 +286,7 @@ let validate_shm_parameters
   else if not (Drm_format.validate_shm ~untrusted_offset ~untrusted_width ~untrusted_height
           ~untrusted_stride ~untrusted_format) then
     shm_pool_invalid_stride shm ~message:"Invalid buffer parameters for format"
-  
+
 (* wl_shm memory buffers are allocated by the client inside the guest and
    cannot be shared directly with the host. Instead, we allocate some host
    memory of the same size, map that into the guest, and copy the data across
@@ -930,13 +930,7 @@ let make_shm ~virtio_gpu bind c =
   end
 
 module Linux_dmabuf = struct
-  type[@warning "-37"] stride =
-    | No_stride
-    | Stride of int32 * int32 * int32
-  external fixup_strides: Unix.file_descr -> Unix.file_descr -> stride =
-    "ocaml_fixup_strides"
-  let make_linux_buffer_params ~untrusted_drm_fd ~host_linux_buffer_params c =
-    let drm_fd = untrusted_drm_fd (* not really untrusted *) in
+  let make_linux_buffer_params ~host_linux_buffer_params c =
     let proxy = cv c in
     let make_dma_buffer ~client_buffer h =
       let c = client_buffer @@ object
@@ -957,26 +951,24 @@ module Linux_dmabuf = struct
     let check_used t created =
       if created then
         C.Zwp_linux_buffer_params_v1.Errors.already_used ~message:"Already created" t
-      else
-        true
     in
     let check_complete t complete =
       if not complete then C.Zwp_linux_buffer_params_v1.Errors.incomplete ~message:"No planes" t
     in
-    Proxy.Handler.attach proxy @@ object
+    Proxy.Handler.attach proxy @@ object (self)
       val mutable created = false
       val mutable have_modifiers = false
-      val mutable modifier_lo_ = 0l
-      val mutable modifier_hi_ = 0l
-      inherit [_] C.Zwp_linux_buffer_params_v1.v1
+      val mutable modifier_lo = 0l
+      val mutable modifier_hi = 0l
+      val buffer_data = [|None; None; None; None|];
+      inherit ['a] C.Zwp_linux_buffer_params_v1.v1
       method on_destroy = delete_with H.Zwp_linux_buffer_params_v1.destroy h
       method on_create_immed t buffer ~untrusted_width ~untrusted_height ~untrusted_format ~untrusted_flags =
-        created <- check_used t created;
-        check_complete t have_modifiers;
-        V.check_width_height_int32 t C.Zwp_linux_buffer_params_v1.Errors.invalid_dimensions ~untrusted_width ~untrusted_height;
+        self#add t ~untrusted_width ~untrusted_height;
         (* sanitize end, I think *)
         (* TODO: check format, flags, etc *)
-        let (width, height, format, flags) = (untrusted_width, untrusted_height, untrusted_format, untrusted_flags) in
+        let (width, height, format, flags) =
+          (untrusted_width, untrusted_height, untrusted_format, untrusted_flags) in
         let host_buffer = H.Zwp_linux_buffer_params_v1.create_immed h ~width ~height ~format ~flags @@ object
           inherit [_] H.Wl_buffer.v1
           method on_release _ = C.Wl_buffer.release buffer
@@ -986,47 +978,91 @@ module Linux_dmabuf = struct
           method! user_data = client_data (Buffer (`Direct host_buffer))
           method on_destroy = delete_with H.Wl_buffer.destroy host_buffer
         end
-      method on_create t ~untrusted_width ~untrusted_height ~untrusted_format ~untrusted_flags =
-        created <- check_used t created;
+      method private add t ~untrusted_width ~untrusted_height =
+        check_used t created;
         check_complete t have_modifiers;
-        V.check_width_height_int32 t C.Zwp_linux_buffer_params_v1.Errors.invalid_dimensions ~untrusted_width ~untrusted_height;
-        (* sanitize end, I think *)
-        (* TODO: check format, flags, etc *)
-        let (width, height, format, flags) = (untrusted_width, untrusted_height, untrusted_format, untrusted_flags) in
-
-        H.Zwp_linux_buffer_params_v1.create h ~width ~height ~format ~flags
-      method on_add t ~untrusted_fd ~untrusted_plane_idx ~untrusted_offset ~untrusted_stride ~untrusted_modifier_hi ~untrusted_modifier_lo =
-        check_used t created |> ignore;
-        if have_modifiers then (
-          if (untrusted_modifier_lo <> modifier_lo_) || (untrusted_modifier_hi <> modifier_hi_) then
-            C.Zwp_linux_buffer_params_v1.Errors.invalid_format ~message:"Modifier mismatch" t
-        ) else (
-          modifier_lo_ <- untrusted_modifier_lo;
-          modifier_hi_ <- untrusted_modifier_hi
+        V.check_width_height_int32 t C.Zwp_linux_buffer_params_v1.Errors.invalid_dimensions
+          ~untrusted_width ~untrusted_height;
+        if Option.is_none buffer_data.(0) then (
+          C.Zwp_linux_buffer_params_v1.Errors.incomplete t ~message:"Plane 0 not used"
         );
-        (* We must fix up the buffer parameters *)
-        let (stride, modifier_hi, modifier_lo) =
-          if untrusted_plane_idx < 0l then (
-            C.Zwp_linux_buffer_params_v1.Errors.plane_idx ~message:"Negative plane index" t
-          ) else if untrusted_offset < 0l then (
-            C.Zwp_linux_buffer_params_v1.Errors.out_of_bounds ~message:"Negative offset" t
-          ) else if untrusted_plane_idx >= 4l then (
-            C.Zwp_linux_buffer_params_v1.Errors.plane_idx ~message:(
-                Format.asprintf "Excessive plane index %ld" untrusted_plane_idx) t
-          ) else if untrusted_plane_idx = 0l then (
-            match drm_fd with
-            | None -> (untrusted_stride, untrusted_modifier_hi, untrusted_modifier_lo)
-            | Some drm_fd -> (
-               match Eio_unix.Fd.use_exn "stride fixup" drm_fd (fixup_strides untrusted_fd) with
-               | No_stride -> (untrusted_stride, untrusted_modifier_hi, untrusted_modifier_lo)
-               | Stride (stride, modifier_hi, modifier_lo) -> (stride, modifier_hi, modifier_lo)
-            )
-          ) else (untrusted_stride, untrusted_modifier_hi, untrusted_modifier_lo) in
-        let (offset, plane_idx, fd) = (untrusted_offset, untrusted_plane_idx, untrusted_fd) in
-        (* Validation of these parameters is handled by the user-mode driver, which is
-           assumed trusted and secure against malicious input. *)
-        H.Zwp_linux_buffer_params_v1.add h ~fd ~plane_idx ~offset ~stride ~modifier_hi ~modifier_lo;
-        have_modifiers <- true
+        let max =
+          if Option.is_none buffer_data.(2) then (
+            if Option.is_some buffer_data.(3) then
+              C.Zwp_linux_buffer_params_v1.Errors.incomplete t ~message:"Plane 3 is set but plane 2 is not"
+            else if Option.is_some buffer_data.(1) then 1 else 0
+          ) else (
+            if Option.is_none buffer_data.(1) then
+              C.Zwp_linux_buffer_params_v1.Errors.incomplete t ~message:"Plane 2 is set but plane 1 is not"
+            else if Option.is_some buffer_data.(3) then 3 else 2
+          ) in
+        for plane_idx = 0 to max do
+          match buffer_data.(plane_idx) with
+          | None -> assert false
+          | Some (fd, offset, stride) ->
+            H.Zwp_linux_buffer_params_v1.add h ~plane_idx:(Int32.of_int plane_idx) ~fd ~offset ~stride ~modifier_hi ~modifier_lo
+        done;
+      method on_create t ~untrusted_width ~untrusted_height ~untrusted_format ~untrusted_flags =
+        (* TODO: check format, flags, etc *)
+        self#add t ~untrusted_width ~untrusted_height;
+        let (width, height, format, flags) =
+          (untrusted_width, untrusted_height, untrusted_format, untrusted_flags) in
+        created <- true;
+        H.Zwp_linux_buffer_params_v1.create h ~width ~height ~format ~flags
+      method on_add t ~untrusted_fd
+               ~(untrusted_plane_idx:int32)
+               ~(untrusted_offset:int32)
+               ~(untrusted_stride:int32)
+               ~(untrusted_modifier_hi:int32)
+               ~(untrusted_modifier_lo:int32) =
+        (* FIXME: close the file descriptor on errors! *)
+        check_used t created;
+        if have_modifiers then begin
+          let (lsl) = Int64.shift_left in
+          let (lor) = Int64.logor in
+          let of_int32 = Int64.of_int32 in
+          let old_modifier = (of_int32 modifier_hi lsl 32) lor (of_int32 modifier_lo) in
+          let new_modifier = (of_int32 untrusted_modifier_hi lsl 32) lor (of_int32 untrusted_modifier_lo) in
+          if old_modifier <> new_modifier then
+            let message = Format.asprintf "Modifier mismatch: previous modifier is 0x%016Lx, but current modifier is 0x%016LX" old_modifier new_modifier in
+            C.Zwp_linux_buffer_params_v1.Errors.invalid_format t ~message
+        end else begin
+          modifier_lo <- untrusted_modifier_lo;
+          modifier_hi <- untrusted_modifier_hi;
+          have_modifiers <- true
+        end;
+        if untrusted_plane_idx < 0l then (
+          let message = Format.asprintf "Negative plane index %ld" untrusted_plane_idx in
+          C.Zwp_linux_buffer_params_v1.Errors.plane_idx ~message t
+        );
+        if untrusted_offset < 0l then (
+          let message = Format.asprintf "Negative offset %ld" untrusted_plane_idx in
+          C.Zwp_linux_buffer_params_v1.Errors.out_of_bounds ~message t
+        );
+        if untrusted_plane_idx >= 4l then (
+          let message = Format.asprintf "Excessive plane index %ld" untrusted_plane_idx in
+          C.Zwp_linux_buffer_params_v1.Errors.plane_idx ~message t
+        );
+        if untrusted_stride <= 0l then (
+          let message = Format.asprintf "Negative or zero stride %ld" untrusted_stride in
+          C.Zwp_linux_buffer_params_v1.Errors.invalid_dimensions ~message t
+        );
+        let size = Relay_stubs.check_fd_offset untrusted_fd in
+        if Int64.of_int32 untrusted_offset >= size then (
+          if size < 0L then (
+            C.Zwp_linux_buffer_params_v1.Errors.invalid_wl_buffer t
+              ~message:"lseek() failed or file size exceeds INT64_MAX"
+          ) else (
+            let message = Format.asprintf "Buffer size is %Ld, but offset is %ld" size untrusted_offset in
+            C.Zwp_linux_buffer_params_v1.Errors.out_of_bounds t ~message
+          )
+        );
+        let plane_idx = Int32.to_int untrusted_plane_idx in
+        match buffer_data.(plane_idx) with
+        | None -> buffer_data.(plane_idx) <- Some (untrusted_fd, untrusted_offset, untrusted_stride)
+        | Some _ ->
+          let message = Format.asprintf "Plane index %d already used" plane_idx in
+          C.Zwp_linux_buffer_params_v1.Errors.already_used ~message t
     end
 
   let make_linux_dmabuf_feedback ?override_dev ~host_dmabuf_feedback c =
@@ -1061,12 +1097,11 @@ module Linux_dmabuf = struct
     Proxy.Handler.attach c @@ object
       val override_dev = Option.map Virtio_gpu.device_string virtio_gpu
       val h = h
-      val drm_fd = Option.map Virtio_gpu.get_dev virtio_gpu
       inherit [_] C.Zwp_linux_dmabuf_v1.v1
       method on_destroy = delete_with H.Zwp_linux_dmabuf_v1.destroy h
       method on_create_params _ params_id =
         let host_linux_buffer_params = H.Zwp_linux_dmabuf_v1.create_params h in
-        make_linux_buffer_params ~untrusted_drm_fd:drm_fd ~host_linux_buffer_params params_id
+        make_linux_buffer_params ~host_linux_buffer_params params_id
       method on_get_surface_feedback _ id ~surface =
         let host_dmabuf_feedback = H.Zwp_linux_dmabuf_v1.get_surface_feedback h ~surface:(to_host surface) in
         make_linux_dmabuf_feedback ?override_dev ~host_dmabuf_feedback id
