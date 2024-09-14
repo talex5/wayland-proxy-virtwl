@@ -166,22 +166,13 @@ validate_format(uint32_t untrusted_format, int32_t untrusted_width, int32_t untr
 }
 
 static bool
-validate_shm(uint64_t const buffer_size,
-             int32_t const untrusted_offset,
-             int32_t const untrusted_width, int32_t const untrusted_height,
+validate_shm(int32_t untrusted_offset,
+	     int32_t const untrusted_width, int32_t const untrusted_height,
              int32_t const untrusted_stride,
              uint32_t const untrusted_format)
 {
-  /* Offset can't be negative and must fit in buffer with a byte to spare. */
-  if ((untrusted_offset < 0) || ((uint64_t)untrusted_offset >= buffer_size)) {
-    return false;
-  }
-
-  /* Offset checked to fit in size above. */
-  uint64_t const remaining_bytes = buffer_size - (uint64_t)untrusted_offset;
-
-  /* Pixman requires that strides and offsets are multiples of 4, so check that here. */
-  if ((untrusted_offset % 4) != 0 || (untrusted_stride % 4) != 0) {
+  /* Offset can't be negative */
+  if (untrusted_offset < 0) {
     return false;
   }
 
@@ -201,23 +192,6 @@ validate_shm(uint64_t const buffer_size,
 
   /* Limit supported strides to 16384 * 8 until there is a need for more. */
   if (untrusted_stride > 16384UL * 8) {
-    return false;
-  }
-
-  /* Cannot overflow or wraparound: INT32_MAX * INT32_MAX < UINT64_MAX and
-   * both untrusted_height and untrusted_stride checked to be greater than 0
-   * earlier.
-   */
-  const uint64_t area = (uint64_t)untrusted_height * (uint64_t)untrusted_stride;
-
-  /* Must fit in the buffer. */
-  if (area > remaining_bytes) {
-    return false;
-  }
-
-  /* End of buffer must be within INT32_MAX. */
-  /* Offset checked to be non-negative so integer overflow is impossible. */
-  if (area > (uint64_t)(INT32_MAX - untrusted_offset)) {
     return false;
   }
 
@@ -264,23 +238,16 @@ validate_fd(long fd, uint32_t untrusted_offset,
 }
 
 CAMLprim value
-validate_shm_native(size_t buffer_size, int32_t offset, int32_t width,
-		    int32_t height, int32_t stride, int32_t format)
+validate_shm_native(int32_t offset, int32_t width, int32_t height, int32_t stride, int32_t format)
 {
-  return Val_bool(validate_shm(buffer_size, offset, width, height, stride, (uint32_t)format));
+  return Val_bool(validate_shm(offset, width, height, stride, (uint32_t)format));
 }
 
 CAMLprim value
-validate_shm_byte(value *argv, int argc)
+validate_shm_byte(value offset, value width, value height, value stride, value format)
 {
-  if (argc != 5)
-    caml_fatal_error("wrong arity");
-  return validate_shm_native(Nativeint_val(argv[0]),
-				      Int32_val(argv[1]),
-				      Int32_val(argv[2]),
-				      Int32_val(argv[3]),
-				      Int32_val(argv[4]),
-				      Int32_val(argv[5]));
+  return Val_bool(validate_shm(Int32_val(offset), Int32_val(width), Int32_val(height),
+			       Int32_val(stride), (uint32_t)Int32_val(format)));
 }
 
 CAMLprim bool validate_fd_native(intnat fd, int32_t offset, int32_t width, int32_t height,

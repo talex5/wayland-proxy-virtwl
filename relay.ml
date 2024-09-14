@@ -260,6 +260,33 @@ let make_region ~host_region r =
     method on_destroy = delete_with H.Wl_region.destroy h
   end
 
+let shm_pool_invalid_stride (proxy:_ C.Wl_shm_pool.t) ~message =
+  Proxy.post_error proxy ~code:1l ~message
+(** [shm_pool_invalid_stride] disconnects the client with an invalid_stride error *)
+
+let validate_shm_parameters
+      ~(buffer_size:int32)
+      ~(untrusted_offset:int32)
+      ~(untrusted_width:int32)
+      ~(untrusted_height:int32)
+      ~(untrusted_stride:int32)
+      ~(untrusted_format:int32)
+      (shm: _ C.Wl_shm_pool.t) =
+  V.check_width_height_int32 shm shm_pool_invalid_stride ~untrusted_width ~untrusted_height;
+  (if untrusted_offset < 0l then
+    shm_pool_invalid_stride shm ~message:"Negative offset");
+  (if untrusted_stride < 1l then
+    shm_pool_invalid_stride shm ~message:"Negative or zero stride");
+
+  (* Overflow impossible: [Int32.max_int * Int32.max_int + Int32.max_int < Int64.max_int] *)
+  let area = Int64.mul (Int64.of_int32 untrusted_height) (Int64.of_int32 untrusted_stride) in
+  let end_pointer = Int64.add area (Int64.of_int32 untrusted_offset) in
+  if Int64.of_int32 buffer_size < end_pointer then
+    shm_pool_invalid_stride shm ~message:"Buffer extends beyond end of pool"
+  else if not (Drm_format.validate_shm ~untrusted_offset ~untrusted_width ~untrusted_height
+          ~untrusted_stride ~untrusted_format) then
+    shm_pool_invalid_stride shm ~message:"Invalid buffer parameters for format"
+  
 (* wl_shm memory buffers are allocated by the client inside the guest and
    cannot be shared directly with the host. Instead, we allocate some host
    memory of the same size, map that into the guest, and copy the data across
@@ -296,10 +323,11 @@ module Shm : sig
 
   val create_buffer : t ->
     untrusted_offset:int32 ->
-    untrusted_width:int32 ->
+    untrusted_width :int32 ->
     untrusted_height:int32 ->
     untrusted_stride:int32 ->
     untrusted_format:int32 ->
+    [>`V1] C.Wl_shm_pool.t ->
     [`V1] C.Wl_buffer.t ->
     buffer
   (** [create_buffer t ... proxy] allocates a region of [t].
@@ -313,9 +341,6 @@ module Shm : sig
 
   val map_buffer : 'v CD.virtwl_buffer Lazy.t -> 'v CD.virtwl_buffer
   (** [map_buffer user_data] is used by the surface when attaching the buffer. *)
-
-  val shm_pool_invalid_stride : ([`Wl_shm_pool], [>`V1], [`Server]) Proxy.t -> 'a
-  (** [shm_pool_invalid_stride] disconnects the client with an invalid_stride error *)
 end = struct
   type mapping = {
     host_pool : [`V1|`V2] H.Wl_shm_pool.t;
@@ -323,8 +348,6 @@ end = struct
     host_memory_pool : Cstruct.buffer;     (* The host's memory mapped into our address space *)
   }
 
-  let shm_pool_invalid_stride proxy =
-    Proxy.post_error proxy ~code:1l ~message:"Invalid pool stride, size, or offset"
 
   type t = {
     host_shm : [`V1|`V2] H.Wl_shm.t;
@@ -408,19 +431,12 @@ end = struct
       )
     )
 
-  let create_buffer t ~untrusted_offset ~untrusted_width ~untrusted_height
-        ~untrusted_stride ~untrusted_format buffer : buffer =
-    let buffer_size =
-      let size = t.size in
-      if size < 0l then
-        assert false (* this is a bug *)
-      else
-        Nativeint.of_int32 size
-    in
-    (* Call into C for input validation. *)
-    (if not (Drm_format.validate_shm ~buffer_size ~untrusted_offset ~untrusted_width ~untrusted_height
-        ~untrusted_stride ~untrusted_format) then
-        shm_pool_invalid_stride buffer);
+  let create_buffer (t: t) ~untrusted_offset ~untrusted_width ~untrusted_height
+        ~untrusted_stride ~untrusted_format
+        (shm: _ C.Wl_shm_pool.t)
+        (buffer: _ C.Wl_buffer.t) : buffer =
+    validate_shm_parameters ~buffer_size:t.size ~untrusted_offset ~untrusted_width ~untrusted_height
+        ~untrusted_stride ~untrusted_format shm;
     let (offset, width, height, stride, format) =
       (untrusted_offset, untrusted_width, untrusted_height, untrusted_stride, untrusted_format) in
     assert (t.ref_count > 0);
@@ -429,7 +445,8 @@ end = struct
       if ref_count < 1 then (
         assert false (* The shm_pool proxy must exist to call this. *)
       ) else if ref_count > Int.max_int - 1 then (
-        shm_pool_invalid_stride buffer (* TODO: better error for refcount overflow *)
+        shm_pool_invalid_stride shm
+          ~message:"Reference count overflow" (* TODO: better error for refcount overflow *)
       ) else (
         t.ref_count <- ref_count + 1
       )
@@ -509,14 +526,27 @@ let make_surface ~xwayland ~host_surface c =
   in
   let state = ref `Show in      (* X11 hidden windows get [`Hide] here *)
   Proxy.Handler.attach c @@ object
+    val mutable buffer_x = Int.min_int;
+    val mutable buffer_y = Int.min_int;
     inherit [_] C.Wl_surface.v1
     method! user_data = client_data (Surface data)
 
     method on_attach p ~buffer ~untrusted_x ~untrusted_y =
       (* sanitize start *)
-      (V.check_x_y p (fun _ -> assert false) ~untrusted_x ~untrusted_y);
+      if Proxy.version p >= 5l then (
+        if untrusted_x <> 0l then
+          C.Wl_surface.Errors.invalid_size p ~message:"Nonzero x passed to wl_surface.attach"
+        else if untrusted_y <> 0l then
+          C.Wl_surface.Errors.invalid_size p ~message:"Nonzero y passed to wl_surface.attach"
+        else
+          ()
+      ) else (
+        (V.check_x_y p (fun _ -> assert false) ~untrusted_x ~untrusted_y);
+      );
       let (x, y) = (untrusted_x, untrusted_y) in
       (* sanitize end *)
+      buffer_x <- Int32.to_int x;
+      buffer_y <- Int32.to_int y;
       let (x, y) = scale_to_host ~xwayland (x, y) in
       when_configured @@ fun () ->
       match buffer with
@@ -695,8 +725,8 @@ let make_shm_pool_virtwl ~virtio_gpu ~host_shm proxy ~fd:client_fd ~size:orig_si
   Proxy.Handler.attach proxy @@ object
     inherit [_] C.Wl_shm_pool.v1
 
-    method on_create_buffer _ buffer ~untrusted_offset ~untrusted_width ~untrusted_height ~untrusted_stride ~untrusted_format =
-      let b = Shm.create_buffer mapping ~untrusted_offset ~untrusted_width ~untrusted_height ~untrusted_stride ~untrusted_format buffer in
+    method on_create_buffer proxy buffer ~untrusted_offset ~untrusted_width ~untrusted_height ~untrusted_stride ~untrusted_format =
+      let b = Shm.create_buffer mapping ~untrusted_offset ~untrusted_width ~untrusted_height ~untrusted_stride ~untrusted_format proxy buffer in
       make_shm_buffer b buffer
 
     method on_destroy t = Proxy.delete t
@@ -705,19 +735,16 @@ let make_shm_pool_virtwl ~virtio_gpu ~host_shm proxy ~fd:client_fd ~size:orig_si
     method on_resize _ ~untrusted_size = Shm.resize mapping untrusted_size
   end
 
-let make_shm_pool_direct host_pool proxy =
+let make_shm_pool_direct size host_pool proxy =
   Proxy.Handler.attach proxy @@ object
+    val buffer_size = size
     inherit [_] C.Wl_shm_pool.v1
 
-    method on_create_buffer p buffer ~untrusted_offset ~untrusted_width ~untrusted_height ~untrusted_stride ~untrusted_format =
-      (* FIXME: check parameters *)
-      (if untrusted_offset < 0l || untrusted_width < 1l || untrusted_height < 1l ||
-           untrusted_stride < untrusted_width then
-        Shm.shm_pool_invalid_stride p);
-      V.check_width_height_int32 p Shm.shm_pool_invalid_stride ~untrusted_width ~untrusted_height;
+    method on_create_buffer shm buffer ~untrusted_offset ~untrusted_width ~untrusted_height ~untrusted_stride ~untrusted_format =
+      validate_shm_parameters ~buffer_size ~untrusted_offset ~untrusted_width ~untrusted_height
+        ~untrusted_stride ~untrusted_format shm;
       let (offset, width, height, stride, format) =
         (untrusted_offset, untrusted_width, untrusted_height, untrusted_stride, untrusted_format) in
-      (* FIXME: check that offset is valid for width, height, or stride *)      (* FIXME: sanitize more! *)
       let host_buffer = H.Wl_shm_pool.create_buffer host_pool ~offset ~width ~height ~stride ~format @@ object
           inherit [_] H.Wl_buffer.v1
           method on_release _ = C.Wl_buffer.release buffer
@@ -897,7 +924,7 @@ let make_shm ~virtio_gpu bind c =
       | None ->
         let host_pool = H.Wl_shm.create_pool h ~fd ~size @@ new H.Wl_shm_pool.v1 in
         Unix.close fd;
-        make_shm_pool_direct host_pool proxy
+        make_shm_pool_direct size host_pool proxy
 
     method on_release = delete_with H.Wl_shm.release h
   end
@@ -1135,12 +1162,11 @@ let make_toplevel ~tag ~host_toplevel c =
     method on_set_minimized _ = H.Xdg_toplevel.set_minimized h
     method on_set_parent _ ~parent = H.Xdg_toplevel.set_parent h ~parent:(Option.map to_host parent)
     method on_set_title _ ~(untrusted_title:string) : unit =
-      (* TODO: sanitize title *)
+      (* TODO: sanitize title using a C library. *)
       H.Xdg_toplevel.set_title h ~title:(tag ^ untrusted_title)
     method on_show_window_menu p ~seat ~(untrusted_serial:int32)
              ~(untrusted_x:int32) ~(untrusted_y:int32): unit =
-      (* TODO: do not fail assertion *)
-      V.check_x_y p (fun _ -> assert false) ~untrusted_x ~untrusted_y;
+      V.check_x_y p C.Xdg_toplevel.Errors.invalid_size ~untrusted_x ~untrusted_y;
       let serial = validate_serial ~untrusted_serial in
       H.Xdg_toplevel.show_window_menu h ~seat:(to_host seat) ~serial ~x:untrusted_x ~y:untrusted_y
     method on_unset_fullscreen _ = H.Xdg_toplevel.unset_fullscreen h
@@ -1195,13 +1221,12 @@ let make_positioner ~host_positioner c =
              ~(untrusted_y:int32)
              ~(untrusted_width:int32)
              ~(untrusted_height:int32): unit =
-      V.check_width_height_int32 p (fun _ -> assert false) ~untrusted_width ~untrusted_height;
-      V.check_x_y p (fun _ -> assert false) ~untrusted_x ~untrusted_y;
-      (* TODO: validate geometry *)
+      V.check_width_height_int32 p C.Xdg_positioner.Errors.invalid_input ~untrusted_width ~untrusted_height;
+      V.check_x_y p C.Xdg_positioner.Errors.invalid_input ~untrusted_x ~untrusted_y;
       let (x, y, width, height) = (untrusted_x, untrusted_y, untrusted_width, untrusted_height) in
       H.Xdg_positioner.set_anchor_rect h ~x ~y ~width ~height
     method on_set_constraint_adjustment _ ~(untrusted_constraint_adjustment:int32): unit =
-      (* UNSAFE *)
+      (* Validated by generated code.  FIXME: better error. *)
       H.Xdg_positioner.set_constraint_adjustment h ~constraint_adjustment:untrusted_constraint_adjustment
     method on_set_gravity _ ~(untrusted_gravity:Protocols.Xdg_positioner.Gravity.t): unit =
       (* UNSAFE *)
