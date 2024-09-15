@@ -38,18 +38,22 @@
  * case the format can't be specified otherwise, so we don't end up
  * with two values describing the same format.
  */
-#ifdef __BIG_ENDIAN
+#if __BYTE_ORDER__ == __ORDER_PDP_ENDIAN__
+# error "PDP endian not supported"
+#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
 # define DRM_FORMAT_HOST_XRGB1555     (DRM_FORMAT_XRGB1555         |	\
 				       DRM_FORMAT_BIG_ENDIAN)
 # define DRM_FORMAT_HOST_RGB565       (DRM_FORMAT_RGB565           |	\
 				       DRM_FORMAT_BIG_ENDIAN)
 # define DRM_FORMAT_HOST_XRGB8888     DRM_FORMAT_BGRX8888
 # define DRM_FORMAT_HOST_ARGB8888     DRM_FORMAT_BGRA8888
-#else
+#elif __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 # define DRM_FORMAT_HOST_XRGB1555     DRM_FORMAT_XRGB1555
 # define DRM_FORMAT_HOST_RGB565       DRM_FORMAT_RGB565
 # define DRM_FORMAT_HOST_XRGB8888     DRM_FORMAT_XRGB8888
 # define DRM_FORMAT_HOST_ARGB8888     DRM_FORMAT_ARGB8888
+#else
+# error "Compiler does not specify endianness"
 #endif
 
 struct drm_device;
@@ -59,52 +63,46 @@ struct drm_mode_fb_cmd2;
  * struct drm_format_info - information about a DRM format
  */
 struct drm_format_info {
-	/** @format: 4CC format identifier (DRM_FORMAT_*) */
+	/** 4CC format identifier (DRM_FORMAT_*) */
 	uint32_t format;
 
 	/**
-	 * @depth:
-	 *
 	 * Color depth (number of bits per pixel excluding padding bits),
 	 * valid for a subset of RGB formats only. This is a legacy field, do
 	 * not use in new code and set to 0 for new formats.
 	 */
 	uint8_t depth;
 
-	/** @num_planes: Number of color planes (1 to 3) */
+	/** Number of color planes (1 to 3) */
 	uint8_t num_planes;
 
 	union {
 		/**
-		 * @cpp:
-		 *
 		 * Number of bytes per pixel (per plane), this is aliased with
-		 * @char_per_block. It is deprecated in favour of using the
-		 * triplet @char_per_block, @block_w, @block_h for better
+		 * @ref char_per_block. It is deprecated in favour of using the
+		 * triplet @ref char_per_block, @ref block_w, @ref block_h for better
 		 * describing the pixel format.
 		 */
 		uint8_t cpp[DRM_FORMAT_MAX_PLANES];
 
 		/**
-		 * @char_per_block:
-		 *
 		 * Number of bytes per block (per plane), where blocks are
 		 * defined as a rectangle of pixels which are stored next to
 		 * each other in a byte aligned memory region. Together with
-		 * @block_w and @block_h this is used to properly describe tiles
+		 * @ref block_w and @ref block_h this is used to properly describe tiles
 		 * in tiled formats or to describe groups of pixels in packed
 		 * formats for which the memory needed for a single pixel is not
 		 * byte aligned.
 		 *
-		 * @cpp has been kept for historical reasons because there are
+		 * @ref cpp has been kept for historical reasons because there are
 		 * a lot of places in drivers where it's used. In drm core for
 		 * generic code paths the preferred way is to use
-		 * @char_per_block, drm_format_info_block_width() and
+		 * @ref char_per_block, drm_format_info_block_width() and
 		 * drm_format_info_block_height() which allows handling both
 		 * block and non-block formats in the same way.
 		 *
 		 * For formats that are intended to be used only with non-linear
-		 * modifiers both @cpp and @char_per_block must be 0 in the
+		 * modifiers both @ref cpp and @ref char_per_block must be 0 in the
 		 * generic format table. Drivers could supply accurate
 		 * information from their drm_mode_config.get_format_info hook
 		 * if they want the core to be validating the pitch.
@@ -113,43 +111,38 @@ struct drm_format_info {
 	};
 
 	/**
-	 * @block_w:
-	 *
 	 * Block width in pixels, this is intended to be accessed through
 	 * drm_format_info_block_width()
 	 */
 	uint8_t block_w[DRM_FORMAT_MAX_PLANES];
 
 	/**
-	 * @block_h:
-	 *
 	 * Block height in pixels, this is intended to be accessed through
 	 * drm_format_info_block_height()
 	 */
 	uint8_t block_h[DRM_FORMAT_MAX_PLANES];
 
-	/** @hsub: Horizontal chroma subsampling factor */
+	/** Horizontal chroma subsampling factor */
 	uint8_t hsub;
-	/** @vsub: Vertical chroma subsampling factor */
+	/** Vertical chroma subsampling factor */
 	uint8_t vsub;
 
-	/** @has_alpha: Does the format embeds an alpha component? */
+	/** Does the format embeds an alpha component? */
 	bool has_alpha;
 
-	/** @is_yuv: Is it a YUV format? */
+	/** Is it a YUV format? */
 	bool is_yuv;
 
-	/** @is_color_indexed: Is it a color-indexed format? */
+	/** Is it a color-indexed format? */
 	bool is_color_indexed;
 };
 
 /**
  * drm_format_info_is_yuv_packed - check that the format info matches a YUV
  * format with data laid in a single plane
- * @info: format info
+ * @param info: format info
  *
- * Returns:
- * A boolean indicating whether the format info matches a packed YUV format.
+ * @return A boolean indicating whether the format info matches a packed YUV format.
  */
 static inline bool
 drm_format_info_is_yuv_packed(const struct drm_format_info *info)
@@ -172,7 +165,7 @@ drm_format_info_is_yuv_semiplanar(const struct drm_format_info *info)
 }
 
 /**
- * drm_format_info_is_yuv_planar - check that the format info matches a YUV
+ * @brief check that the format info matches a YUV
  * format with data laid in three planes (one for each YUV component).
  * @param info format info
  *
@@ -186,7 +179,7 @@ drm_format_info_is_yuv_planar(const struct drm_format_info *info)
 }
 
 /**
- * drm_format_info_is_yuv_sampling_410 - check that the format info matches a
+ * @brief check that the format info matches a
  * YUV format with 4:1:0 sub-sampling
  * @param info format info
  *
@@ -216,7 +209,7 @@ drm_format_info_is_yuv_sampling_411(const struct drm_format_info *info)
 }
 
 /**
- * drm_format_info_is_yuv_sampling_420 - check that the format info matches a
+ * @brief check that the format info matches a
  * YUV format with 4:2:0 sub-sampling
  * @param info: format info
  *
@@ -231,11 +224,11 @@ drm_format_info_is_yuv_sampling_420(const struct drm_format_info *info)
 }
 
 /**
- * drm_format_info_is_yuv_sampling_422 - check that the format info matches a
+ * @brief check that the format info matches a
  * YUV format with 4:2:2 sub-sampling
- * @info: format info
+ * @param info format info
  *
- * Returns:
+ * @return
  * A boolean indicating whether the format info matches a YUV format with 4:2:2
  * sub-sampling.
  */
@@ -246,9 +239,9 @@ drm_format_info_is_yuv_sampling_422(const struct drm_format_info *info)
 }
 
 /**
- * drm_format_info_is_yuv_sampling_444 - check that the format info matches a
+ * @brief check that the format info matches a
  * YUV format with 4:4:4 sub-sampling
- * @param info: format info
+ * @param info format info
  *
  * @return
  * A boolean indicating whether the format info matches a YUV format with 4:4:4
@@ -261,10 +254,10 @@ drm_format_info_is_yuv_sampling_444(const struct drm_format_info *info)
 }
 
 /**
- * drm_format_info_plane_width - width of the plane given the first plane
- * @param info: pixel format info
- * @param width: width of the first plane
- * @param plane: plane index
+ * @brief width of the plane given the first plane
+ * @param info pixel format info
+ * @param width width of the first plane
+ * @param plane plane index
  *
  * @return
  * The width of plane, given that the width of the first plane is width.
@@ -283,10 +276,10 @@ drm_format_info_plane_width(const struct drm_format_info *info, uint32_t width,
 }
 
 /**
- * drm_format_info_plane_height - height of the plane given the first plane
- * @param info: pixel format info
- * @param height: height of the first plane
- * @param plane: plane index
+ * @brief height of the plane given the first plane
+ * @param info pixel format info
+ * @param height height of the first plane
+ * @param plane plane index
  *
  * @return
  * The height of plane, given that the height of the first plane is height.
@@ -321,4 +314,5 @@ uint64_t drm_format_info_min_pitch(const struct drm_format_info *info,
  * c-basic-offset: 8
  * indent-tabs-mode: t
  * c-file-style: linux
+ * End:
  */

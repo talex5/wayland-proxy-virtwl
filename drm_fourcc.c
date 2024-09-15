@@ -25,8 +25,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include "drm_fourcc.h"
 #include <drm/drm_fourcc.h>
+#include "drm_fourcc.h"
 #define ARRAY_SIZE(x) (sizeof(x)/sizeof((x)[0]))
 	static const struct drm_format_info formats[] = {
 		{ .format = DRM_FORMAT_C1,		.depth = 1,  .num_planes = 1,
