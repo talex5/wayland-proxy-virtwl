@@ -3,9 +3,9 @@
 
 #include <unistd.h>
 #include "drm_fourcc.h"
-#include "/home/user/wayland-proxy-virtwl/drm_fourcc.c"
 #include <drm/drm_fourcc.h>
 #include <caml/mlvalues.h>
+#include <caml/alloc.h>
 
 /** Notes:
  *
@@ -18,9 +18,9 @@
  *   plane index 1.
  */
 bool validate_planes(uint32_t formats[static 4], uint64_t modifiers[static 4],
-		     uint32_t stride[static 4], uint64_t sizes[static 4],
-		     uint32_t width, uint32_t height,
-		     uint32_t plane_count)
+                     uint32_t stride[static 4], uint64_t sizes[static 4],
+                     uint32_t width, uint32_t height,
+                     uint32_t plane_count)
 {
   if (plane_count > 4)
     return false; /* too many */
@@ -30,22 +30,22 @@ bool validate_planes(uint32_t formats[static 4], uint64_t modifiers[static 4],
     case I915_FORMAT_MOD_Y_TILED_CCS:
     case I915_FORMAT_MOD_Yf_TILED_CCS:
       if (i != 1 || plane_count != 2)
-	return false; /* bad! */
+        return false; /* bad! */
       if (modifiers[0] != modifiers[i] - 2)
-	return false; /* mismatch between plane 0 and plane 1 */
+        return false; /* mismatch between plane 0 and plane 1 */
       if (stride[0] % 1024 != 0 || stride[1] != stride[0] / 8)
-	return false; /* bad stride */
+        return false; /* bad stride */
       if (height % 512 != 0)
-	return false; /* bad height */
+        return false; /* bad height */
       /* TODO: check other requirements */
       break;
     case I915_FORMAT_MOD_Y_TILED_GEN12_RC_CCS:
       if (i != 1 || plane_count != 2)
-	return false; /* bad! */
+        return false; /* bad! */
       if (modifiers[0] != I915_FORMAT_MOD_Y_TILED)
-	return false; /* bad! */
+        return false; /* bad! */
       if (stride[0] % (4096 * 4))
-	return false; /* main surface pitch not multiple of 4 Y tile widths */
+        return false; /* main surface pitch not multiple of 4 Y tile widths */
       break;
     }
   }
@@ -80,32 +80,56 @@ static uint32_t div_round_up(uint32_t num, uint32_t denom)
  *         Wayland buffers cannot have zero pixels, so 0 bytes remaining
  *         is itself an error.
  */
-static uint64_t
-get_fd_size(long fd, uint64_t untrusted_offset)
+static int64_t
+get_fd_size(long fd)
 {
   if (fd < 0 || fd > INT_MAX) {
     caml_fatal_error("Junk file descriptor passed to validate_fd");
   }
 
   off_t untrusted_raw_size = lseek((int)fd, 0, SEEK_END);
-  if (untrusted_raw_size < -1) {
-    caml_fatal_error("Junk return value from lseek()");
+  if (untrusted_raw_size < 0 || untrusted_raw_size > INT64_MAX) {
+    /* lseek() failed or size too large for int64_t */
+    return -1;
   }
 
-  if (untrusted_raw_size < 0) {
-    return 0; /* cannot validate */
+  return (int64_t)untrusted_raw_size;
+}
+
+CAMLprim int64_t
+wayland_proxy_virtwl_check_fd_offset_native(value fd)
+{
+  return get_fd_size(Long_val(fd));
+}
+
+CAMLprim value
+wayland_proxy_virtwl_check_fd_offset_byte(value fd)
+{
+  return caml_copy_int64(get_fd_size(Long_val(fd)));
+}
+
+static const struct drm_format_info *
+get_format(uint32_t untrusted_format)
+{
+  const struct drm_format_info *const info = drm_format_info(untrusted_format);
+  if (info == NULL) {
+    /* Unknown format, cannot validate. */
+    return NULL;
   }
 
-  uint64_t untrusted_size = (uint64_t)untrusted_raw_size;
-  if ((off_t)untrusted_size != untrusted_raw_size) {
-    return 0; /* overflow */
+  if (info->hsub < 1 || info->vsub < 1 || info->num_planes < 0 || info->num_planes > 4) {
+    caml_fatal_error("Corrupt description for format");
   }
 
-  if (untrusted_offset >= untrusted_size) {
-    return 0; /* offset out of bounds or empty FD */
+  if (info->is_color_indexed) {
+    return NULL; /* Color index cannot be used. */
   }
 
-  return untrusted_size - untrusted_offset;
+  if (drm_format_info_block_height(info, 0) != 1) {
+    /* Multiple pixels per vertical block.  It is unclear whether the
+     * stride should be multiplied by the block height or not. */
+    return NULL;
+  }
 }
 
 static const struct drm_format_info *
@@ -119,17 +143,9 @@ validate_format(uint32_t untrusted_format, int32_t untrusted_width, int32_t untr
     return NULL; /* Too wide, too tall, or both. */
   }
 
-  const struct drm_format_info *const info = drm_format_info(untrusted_format);
+  const struct drm_format_info *const info = get_format(untrusted_format);
   if (info == NULL) {
-    return NULL; /* Unknown format, cannot validate. */
-  }
-
-  if (info->hsub < 1 || info->vsub < 1 || info->num_planes < 0 || info->num_planes > 4) {
-    caml_fatal_error("Corrupt description for format");
-  }
-
-  if (info->is_color_indexed) {
-    return NULL; /* Color index cannot be used. */
+    return NULL;
   }
 
   if (untrusted_width % info->hsub) {
@@ -140,7 +156,7 @@ validate_format(uint32_t untrusted_format, int32_t untrusted_width, int32_t untr
     return NULL; /* Height not multiple of subsampled block size, violating Vulkan valid usage. */
   }
 
-  /* Check that the block width is valid.  This implicitly check for NULL info. */
+  /* Check that the block width is valid. */
   const unsigned int block_width = drm_format_info_block_width(info, 0);
   if (block_width < 1) {
     return NULL;
@@ -167,7 +183,7 @@ validate_format(uint32_t untrusted_format, int32_t untrusted_width, int32_t untr
 
 static bool
 validate_shm(int32_t untrusted_offset,
-	     int32_t const untrusted_width, int32_t const untrusted_height,
+             int32_t const untrusted_width, int32_t const untrusted_height,
              int32_t const untrusted_stride,
              uint32_t const untrusted_format)
 {
@@ -230,9 +246,9 @@ validate_shm(int32_t untrusted_offset,
 
 static const struct drm_format_info *
 validate_fd(long fd, uint32_t untrusted_offset,
-	    int32_t width, int32_t height,
-	    uint32_t stride, uint32_t format, uint64_t modifiers,
-	    uint32_t plane_idx)
+            int32_t width, int32_t height,
+            uint32_t stride, uint32_t format, uint64_t modifiers,
+            uint32_t plane_idx)
 {
   caml_fatal_error("TODO");
 }
@@ -247,17 +263,17 @@ CAMLprim value
 validate_shm_byte(value offset, value width, value height, value stride, value format)
 {
   return Val_bool(validate_shm(Int32_val(offset), Int32_val(width), Int32_val(height),
-			       Int32_val(stride), (uint32_t)Int32_val(format)));
+                               Int32_val(stride), (uint32_t)Int32_val(format)));
 }
 
 CAMLprim bool validate_fd_native(intnat fd, int32_t offset, int32_t width, int32_t height,
-				 int32_t stride, int32_t format, int64_t modifiers,
-				 int32_t plane_idx)
+                                 int32_t stride, int32_t format, int64_t modifiers,
+                                 int32_t plane_idx)
 {
   if (fd < 0 || fd > INT_MAX)
     return false;
   return validate_fd((int)fd, (uint32_t)offset, width, height, stride,
-		     (uint32_t)format, (uint64_t)modifiers, (uint64_t)plane_idx);
+                     (uint32_t)format, (uint64_t)modifiers, (uint64_t)plane_idx);
 }
 
 CAMLprim value
@@ -266,11 +282,19 @@ validate_fd_byte(value *argv, int argc)
   if (argc != 8)
     caml_fatal_error("wrong arity");
   return Val_bool(validate_fd_native(Long_val(argv[0]),
-				     (uint32_t)Int32_val(argv[1]),
-				     Int32_val(argv[2]),
-				     Int32_val(argv[3]),
-				     Int32_val(argv[4]),
-				     (uint32_t)Int32_val(argv[5]),
-				     (uint64_t)Int64_val(argv[6]),
-				     (uint32_t)Int32_val(argv[7])));
+                                     (uint32_t)Int32_val(argv[1]),
+                                     Int32_val(argv[2]),
+                                     Int32_val(argv[3]),
+                                     Int32_val(argv[4]),
+                                     (uint32_t)Int32_val(argv[5]),
+                                     (uint64_t)Int64_val(argv[6]),
+                                     (uint32_t)Int32_val(argv[7])));
 }
+
+/*
+ * Local Variables:
+ * c-basic-offset: 2
+ * indent-tabs-mode: nil
+ * c-file-style: "linux"
+ * End:
+ */
