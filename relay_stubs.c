@@ -233,7 +233,7 @@ validate_shm(int32_t untrusted_offset,
       return false;
    }
 
-   uint64_t min_pitch = drm_format_info_min_pitch(info, 1, (uint32_t)untrusted_width);
+   uint64_t min_pitch = drm_format_info_min_pitch(info, 0, (uint32_t)untrusted_width);
 
    if (min_pitch < 1) {
       /* This means a bug in the DRM format handling code. */
