@@ -165,15 +165,31 @@ validate_format(uint32_t untrusted_format, int32_t untrusted_width, int32_t untr
    return info;
 }
 
+
+
 static bool
 validate_shm(int32_t untrusted_offset,
              int32_t const untrusted_width, int32_t const untrusted_height,
              int32_t const untrusted_stride,
-             uint32_t const untrusted_format)
+             uint32_t untrusted_format)
 {
    /* Offset can't be negative */
    if (untrusted_offset < 0) {
       return false;
+   }
+
+   switch (untrusted_format) {
+   case DRM_FORMAT_ARGB8888:
+   case DRM_FORMAT_XRGB8888:
+      return false;
+   case 0:
+      untrusted_format = DRM_FORMAT_ARGB8888;
+      break;
+   case 1:
+      untrusted_format = DRM_FORMAT_XRGB8888;
+      break;
+   default:
+      break;
    }
 
    /* This checks that untrusted_width and untrusted_height are both at least 1
