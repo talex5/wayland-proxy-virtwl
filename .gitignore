@@ -3,5 +3,4 @@ _build
 /case.c
 /datum
 /datum.deps
-/drm_fourcc_table.h
 /doxygen_docs/
