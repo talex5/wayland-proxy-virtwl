@@ -260,9 +260,15 @@ let make_region ~host_region r =
     method on_destroy = delete_with H.Wl_region.destroy h
   end
 
-let shm_pool_invalid_stride (proxy:_ C.Wl_shm_pool.t) ~message =
-  Proxy.post_error proxy ~code:1l ~message
+let shm_pool_invalid_stride (proxy:_ C.Wl_shm_pool.t) =
+  Format.kasprintf (fun message -> Proxy.post_error proxy ~code:1l ~message)
+  [@@ocaml.inline never]
 (** [shm_pool_invalid_stride] disconnects the client with an invalid_stride error *)
+
+let shm_pool_invalid_stride_str proxy =
+  Proxy.post_error proxy ~code:1l
+  [@@ocaml.inline never]
+(** [shm_pool_invalid_stride_str] disconnects the client with an invalid_stride error *)
 
 let validate_shm_parameters
       ~(buffer_size:int32)
@@ -272,20 +278,23 @@ let validate_shm_parameters
       ~(untrusted_stride:int32)
       ~(untrusted_format:int32)
       (shm: _ C.Wl_shm_pool.t) =
-  V.check_width_height_int32 shm shm_pool_invalid_stride ~untrusted_width ~untrusted_height;
+  V.check_width_height_int32 shm shm_pool_invalid_stride_str ~untrusted_width ~untrusted_height;
   (if untrusted_offset < 0l then
-    shm_pool_invalid_stride shm ~message:"Negative offset");
+    shm_pool_invalid_stride shm "Negative offset %ld" untrusted_offset);
   (if untrusted_stride < 1l then
-    shm_pool_invalid_stride shm ~message:"Negative or zero stride");
-
+    shm_pool_invalid_stride shm "Negative or zero stride %ld" untrusted_stride);
+  (if buffer_size < 0l then assert false (* bug *));
   (* Overflow impossible: [Int32.max_int * Int32.max_int + Int32.max_int < Int64.max_int] *)
   let area = Int64.mul (Int64.of_int32 untrusted_height) (Int64.of_int32 untrusted_stride) in
   let end_pointer = Int64.add area (Int64.of_int32 untrusted_offset) in
-  if Int64.of_int32 buffer_size < end_pointer then
-    shm_pool_invalid_stride shm ~message:"Buffer extends beyond end of pool"
+  if end_pointer > Int64.of_int32 buffer_size then
+    shm_pool_invalid_stride shm "Buffer extends beyond end of pool: size %ldx%ld, \
+                                 stride %ld, offset %ld, area %Ld, end pointer %Ld, buffer size %ld"
+      untrusted_width untrusted_height untrusted_stride untrusted_offset
+      area end_pointer buffer_size
   else if not (Drm_format.validate_shm ~untrusted_offset ~untrusted_width ~untrusted_height
           ~untrusted_stride ~untrusted_format) then
-    shm_pool_invalid_stride shm ~message:"Invalid buffer parameters for format"
+    shm_pool_invalid_stride shm "Invalid buffer parameters for format"
 
 (* wl_shm memory buffers are allocated by the client inside the guest and
    cannot be shared directly with the host. Instead, we allocate some host
@@ -445,7 +454,7 @@ end = struct
       if ref_count < 1 then (
         assert false (* The shm_pool proxy must exist to call this. *)
       ) else if ref_count > Int.max_int - 1 then (
-        shm_pool_invalid_stride shm
+        shm_pool_invalid_stride_str shm
           ~message:"Reference count overflow" (* TODO: better error for refcount overflow *)
       ) else (
         t.ref_count <- ref_count + 1
