@@ -6,7 +6,7 @@
 #include <drm/drm_fourcc.h>
 #include <caml/mlvalues.h>
 #include <caml/alloc.h>
-
+#if 0
 /** Notes:
  *
  * - I915_*_TILED_CCS formats must have a pitch that is a multiple of
@@ -51,25 +51,7 @@ bool validate_planes(uint32_t formats[static 4], uint64_t modifiers[static 4],
    }
    return true; /* TODO catch more bad cases */
 }
-
-/*   UINT32_MAX * UINT32_MAX + UINT32_MAX
- * = (2**32 - 1)**2 + (2**32 - 1)
- * = (2**64 - (2 * 2**32) + 1) + (2**32 - 1)
- * = (2**64 - 1) - (2**32 - 1)
- * < UINT64_MAX
- * so this cannot overflow.
- */
-static uint64_t mul_32_to_64(uint32_t a, uint32_t b)
-{
-   return (uint64_t)a * (uint64_t)b;
-}
-
-static uint32_t div_round_up(uint32_t num, uint32_t denom)
-{
-   if (denom < 1)
-      abort();
-   return (uint32_t)(((uint64_t)num + (uint64_t)denom - UINT64_C(1)) / denom);
-}
+#endif
 
 /**
  * Get the number of bytes remaining in a file descriptor after the provided offset.
@@ -117,7 +99,7 @@ get_format(uint32_t untrusted_format)
       return NULL;
    }
 
-   if (info->hsub < 1 || info->vsub < 1 || info->num_planes < 0 || info->num_planes > 4) {
+   if (info->hsub < 1 || info->vsub < 1 || info->num_planes > 4) {
       caml_fatal_error("Corrupt description for format");
    }
 
@@ -209,7 +191,7 @@ validate_shm(int32_t untrusted_offset,
    }
 
    /* Limit supported strides to 16384 * 8 until there is a need for more. */
-   if (untrusted_stride > 16384UL * 8) {
+   if (untrusted_stride > 16384L * 8) {
       return false;
    }
 
@@ -243,16 +225,7 @@ validate_shm(int32_t untrusted_offset,
    }
 
    /* Check that the stride is sufficient. */
-   return untrusted_stride >= min_pitch;
-}
-
-static const struct drm_format_info *
-validate_fd(long fd, uint32_t untrusted_offset,
-            int32_t width, int32_t height,
-            uint32_t stride, uint32_t format, uint64_t modifiers,
-            uint32_t plane_idx)
-{
-   caml_fatal_error("TODO");
+   return (uint32_t)untrusted_stride >= min_pitch;
 }
 
 CAMLprim value
@@ -266,31 +239,6 @@ validate_shm_byte(value offset, value width, value height, value stride, value f
 {
    return Val_bool(validate_shm(Int32_val(offset), Int32_val(width), Int32_val(height),
                                 Int32_val(stride), (uint32_t)Int32_val(format)));
-}
-
-CAMLprim bool validate_fd_native(intnat fd, int32_t offset, int32_t width, int32_t height,
-                                 int32_t stride, int32_t format, int64_t modifiers,
-                                 int32_t plane_idx)
-{
-   if (fd < 0 || fd > INT_MAX)
-      return false;
-   return validate_fd((int)fd, (uint32_t)offset, width, height, stride,
-                      (uint32_t)format, (uint64_t)modifiers, (uint64_t)plane_idx);
-}
-
-CAMLprim value
-validate_fd_byte(value *argv, int argc)
-{
-   if (argc != 8)
-      caml_fatal_error("wrong arity");
-   return Val_bool(validate_fd_native(Long_val(argv[0]),
-                                      (uint32_t)Int32_val(argv[1]),
-                                      Int32_val(argv[2]),
-                                      Int32_val(argv[3]),
-                                      Int32_val(argv[4]),
-                                      (uint32_t)Int32_val(argv[5]),
-                                      (uint64_t)Int64_val(argv[6]),
-                                      (uint32_t)Int32_val(argv[7])));
 }
 
 /*

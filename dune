@@ -3,7 +3,7 @@
   (foreign_stubs
     (language c)
     (names relay_stubs drm_fourcc)
-    (flags (:standard)))
+    (flags (:standard -Wall -Wextra -Werror)))
   (public_name wayland-proxy-virtwl)
   (preprocess (pps ppx_cstruct))
   (libraries wayland wayland.protocols virtio_gpu cmdliner fmt x11 eio_main))
