@@ -770,7 +770,9 @@ let make_shm_pool_direct size host_pool proxy =
 
     method on_destroy _ = H.Wl_shm_pool.destroy host_pool
 
-    method on_resize _ ~untrusted_size =
+    method on_resize c ~untrusted_size =
+      (if untrusted_size < buffer_size then
+        shm_pool_invalid_stride_str c ~message:"Attempt to shrink buffer");
       let size = unsafe_no_sanitize untrusted_size in
       H.Wl_shm_pool.resize host_pool ~size;
       buffer_size <- size
