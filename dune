@@ -2,7 +2,7 @@
   (name main)
   (foreign_stubs
     (language c)
-    (names relay_stubs)
+    (names relay_stubs drm_fourcc)
     (flags (:standard)))
   (public_name wayland-proxy-virtwl)
   (preprocess (pps ppx_cstruct))

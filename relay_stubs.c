@@ -130,6 +130,8 @@ get_format(uint32_t untrusted_format)
        * stride should be multiplied by the block height or not. */
       return NULL;
    }
+
+   return info;
 }
 
 static const struct drm_format_info *
