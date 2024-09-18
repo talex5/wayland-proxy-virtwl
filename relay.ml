@@ -727,6 +727,9 @@ let make_shm_buffer b proxy =
     method on_destroy _ = Shm.destroy_buffer b
   end
 
+external unsafe_no_sanitize: 'a -> 'a = "%identity"
+(** This is [Obj.magic] used (safely) at type ['a -> 'a] *)
+
 (* todo: this all needs to be more robust.
    Also, sealing? *)
 let make_shm_pool_virtwl ~virtio_gpu ~host_shm proxy ~fd:client_fd ~size:orig_size =
@@ -746,7 +749,7 @@ let make_shm_pool_virtwl ~virtio_gpu ~host_shm proxy ~fd:client_fd ~size:orig_si
 
 let make_shm_pool_direct size host_pool proxy =
   Proxy.Handler.attach proxy @@ object
-    val buffer_size = size
+    val mutable buffer_size = size
     inherit [_] C.Wl_shm_pool.v1
 
     method on_create_buffer shm buffer ~untrusted_offset ~untrusted_width ~untrusted_height ~untrusted_stride ~untrusted_format =
@@ -767,7 +770,10 @@ let make_shm_pool_direct size host_pool proxy =
 
     method on_destroy _ = H.Wl_shm_pool.destroy host_pool
 
-    method on_resize _ ~untrusted_size = H.Wl_shm_pool.resize host_pool ~size:untrusted_size (* UNSAFE *)
+    method on_resize _ ~untrusted_size =
+      let size = unsafe_no_sanitize untrusted_size in
+      H.Wl_shm_pool.resize host_pool ~size;
+      buffer_size <- size
   end
 
 let make_output ~xwayland bind c =
@@ -1273,8 +1279,8 @@ let make_positioner ~host_positioner c =
       (* Validated by generated code.  FIXME: better error. *)
       H.Xdg_positioner.set_constraint_adjustment h ~constraint_adjustment:untrusted_constraint_adjustment
     method on_set_gravity _ ~(untrusted_gravity:Protocols.Xdg_positioner.Gravity.t): unit =
-      (* UNSAFE *)
-      H.Xdg_positioner.set_gravity h ~gravity:untrusted_gravity
+      let gravity = unsafe_no_sanitize untrusted_gravity in
+      H.Xdg_positioner.set_gravity h ~gravity
     method on_set_offset p ~(untrusted_x:int32) ~(untrusted_y:int32): unit =
       (* UNSAFE *)
       V.check_x_y p (fun _ -> assert false) ~untrusted_x ~untrusted_y;
