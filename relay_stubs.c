@@ -1,11 +1,16 @@
 #include <stdint.h>
 #include <stdbool.h>
+#include <errno.h>
 
+#include <sys/stat.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #include "drm_fourcc.h"
 #include <drm/drm_fourcc.h>
+
 #include <caml/mlvalues.h>
 #include <caml/alloc.h>
+#include <caml/unixsupport.h>
 #if 0
 /** Notes:
  *
@@ -165,7 +170,47 @@ validate_format(uint32_t untrusted_format, int32_t untrusted_width, int32_t untr
    return info;
 }
 
-
+CAMLprim value
+wayland_proxy_virtwl_validate_pipe(value arg)
+{
+   long v = Long_val(arg);
+   if (v < 0 || v > INT_MAX)
+      caml_fatal_error("invalid file descriptor %ld", v);
+   struct stat stat_buf;
+   int res = fstat((int)v, &stat_buf);
+   if (res == -1) {
+      if (errno == 0)
+         caml_fatal_error("fstat() failed without setting errno");
+      caml_unix_error(errno, "validate pipe: fstat()", Nothing);
+   }
+   if (res != 0)
+      caml_fatal_error("fstat() returned %d, not 0 or 1 (kernel bug?)", res);
+   switch (stat_buf.st_mode & S_IFMT) {
+   case S_IFIFO:
+      return Val_int(0);
+   case S_IFSOCK: {
+      int domain;
+      socklen_t len = sizeof(domain);
+      res = getsockopt(v, SOL_SOCKET, SO_DOMAIN, &domain, &len);
+      if (res == -1)
+         caml_unix_error(errno, "validate pipe: getsockopt(SOL_SOCKET, SO_DOMAIN)", Nothing);
+      if (len != sizeof(domain))
+         caml_fatal_error("bad socklen_t (%ju) set by getsockopt()", (uintmax_t)len);
+      if (domain != AF_UNIX)
+         return Val_int(-1);
+      res = getsockopt(v, SOL_SOCKET, SO_TYPE, &domain, &len);
+      if (res == -1)
+         caml_unix_error(errno, "validate pipe: getsockopt(SOL_SOCKET, SO_TYPE)", Nothing);
+      if (len != sizeof(domain))
+         caml_fatal_error("bad socklen_t (%ju) set by getsockopt()", (uintmax_t)len);
+      if (domain != SOCK_STREAM)
+         return Val_int(-2);
+      return Val_int(0);
+   }
+   default:
+      return Val_int(-3);
+   }
+}
 
 static bool
 validate_shm(int32_t untrusted_offset,

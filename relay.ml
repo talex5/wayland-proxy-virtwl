@@ -1466,6 +1466,7 @@ let validate_mime_type _ ~(untrusted_mime_type:string): string =
   (* FIXME: validate! *)
   untrusted_mime_type
 
+
 let make_data_offer ~client_offer h =
   let c = client_offer @@ object
       inherit [_] C.Wl_data_offer.v1
@@ -1484,8 +1485,15 @@ let make_data_offer ~client_offer h =
         Proxy.delete h
       method on_finish _ = H.Wl_data_offer.finish h
       method on_receive _ ~(untrusted_mime_type:string) ~(untrusted_fd:Unix.file_descr): unit =
-        (* TODO: check that the file descriptor is a pipe. *)
-        let fd = untrusted_fd in
+        let fd = match Relay_stubs.validate_pipe untrusted_fd with
+        (* FIXME: better logging *)
+        | exception Unix.Unix_error _ -> Wayland.Msg.bad_implementation "problem validating pipe"
+        | 0 -> untrusted_fd
+        | -1 -> Wayland.Msg.bad_implementation "File descriptor is a socket, but not AF_UNIX socket"
+        | -2 -> Wayland.Msg.bad_implementation "File descriptor is an AF_UNIX socket, but not a stream socket"
+        | -3 -> Wayland.Msg.bad_implementation "File descriptor is neither a pipe nor a socket"
+        | _ -> assert false
+        in
         (* TODO: check that the MIME type is valid *)
         Fun.protect
           ~finally:(fun () -> Unix.close fd)
