@@ -979,10 +979,10 @@ module Linux_dmabuf = struct
       val mutable modifier_hi = 0l
       val buffer_data = [|None; None; None; None|];
       inherit ['a] C.Zwp_linux_buffer_params_v1.v1
+      (* FIXME: close the file descriptors *)
       method on_destroy = delete_with H.Zwp_linux_buffer_params_v1.destroy h
       method on_create_immed t buffer ~untrusted_width ~untrusted_height ~untrusted_format ~untrusted_flags =
-        self#add t ~untrusted_width ~untrusted_height;
-        (* sanitize end, I think *)
+        self#add t ~untrusted_format ~untrusted_width ~untrusted_height;
         (* TODO: check format, flags, etc *)
         let (width, height, format, flags) =
           (untrusted_width, untrusted_height, untrusted_format, untrusted_flags) in
@@ -995,11 +995,15 @@ module Linux_dmabuf = struct
           method! user_data = client_data (Buffer (`Direct host_buffer))
           method on_destroy = delete_with H.Wl_buffer.destroy host_buffer
         end
-      method private add t ~untrusted_width ~untrusted_height =
+      method private add t ~untrusted_format ~untrusted_width ~untrusted_height =
         check_used t created;
         check_complete t have_modifiers;
         V.check_width_height_int32 t C.Zwp_linux_buffer_params_v1.Errors.invalid_dimensions
           ~untrusted_width ~untrusted_height;
+        if not (Relay_stubs.validate_format ~untrusted_format ~untrusted_width ~untrusted_height) then (
+          C.Zwp_linux_buffer_params_v1.Errors.invalid_dimensions t
+            ~message:"Invalid format or invalid dimensions for format"
+        );
         if Option.is_none buffer_data.(0) then (
           C.Zwp_linux_buffer_params_v1.Errors.incomplete t ~message:"Plane 0 not used"
         );
@@ -1016,12 +1020,16 @@ module Linux_dmabuf = struct
         for plane_idx = 0 to max do
           match buffer_data.(plane_idx) with
           | None -> assert false
-          | Some (fd, offset, stride) ->
+          | Some (fd, offset, stride) -> (
+            (* Avoid double FD close *)
+            buffer_data.(plane_idx) <- None;
+            (* FIXME: does this take ownership of the FD? *)
             H.Zwp_linux_buffer_params_v1.add h ~plane_idx:(Int32.of_int plane_idx) ~fd ~offset ~stride ~modifier_hi ~modifier_lo
-        done;
+          )
+        done
       method on_create t ~untrusted_width ~untrusted_height ~untrusted_format ~untrusted_flags =
         (* TODO: check format, flags, etc *)
-        self#add t ~untrusted_width ~untrusted_height;
+        self#add t ~untrusted_format ~untrusted_width ~untrusted_height;
         let (width, height, format, flags) =
           (untrusted_width, untrusted_height, untrusted_format, untrusted_flags) in
         created <- true;

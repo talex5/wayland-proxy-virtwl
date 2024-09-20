@@ -302,6 +302,20 @@ validate_shm_byte(value offset, value width, value height, value stride, value f
                                 Int32_val(stride), (uint32_t)Int32_val(format)));
 }
 
+CAMLprim value
+wayland_proxy_virtwl_validate_format_native(int32_t untrusted_format, int32_t untrusted_width, int32_t untrusted_height)
+{
+   return Val_bool(validate_format((uint32_t)untrusted_format, untrusted_width, untrusted_height) != NULL);
+}
+
+CAMLprim value
+wayland_proxy_virtwl_validate_format_byte(value untrusted_format, value untrusted_width, value untrusted_height)
+{
+   return Val_bool(validate_format((uint32_t)Int32_val(untrusted_format),
+                                   Int32_val(untrusted_width),
+                                   Int32_val(untrusted_height)) != NULL);
+}
+
 /*
  * Local Variables:
  * c-basic-offset: 3
