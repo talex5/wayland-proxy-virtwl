@@ -239,6 +239,8 @@ let delete_with fn host client =
   Proxy.on_delete host (fun () -> if Proxy.transport_up client then Proxy.delete client);
   fn host
 
+let bad_impl _ ~message = Msg.bad_implementation message
+
 let make_region ~host_region r =
   let h = host_region @@ new H.Wl_region.v1 in
   let user_data = client_data (Region h) in
@@ -246,14 +248,14 @@ let make_region ~host_region r =
     inherit [_] C.Wl_region.v1
     method! user_data = user_data
     method on_add t ~untrusted_x ~untrusted_y ~untrusted_width ~untrusted_height =
-      V.check_x_y t (fun _ -> assert false) ~untrusted_x ~untrusted_y;
-      V.check_width_height_int32 t (fun _ -> assert false) ~untrusted_width ~untrusted_height;
+      V.check_x_y t bad_impl ~untrusted_x ~untrusted_y;
+      V.check_width_height_int32 t bad_impl ~untrusted_width ~untrusted_height;
       let (x, y, width, height) = (untrusted_x, untrusted_y, untrusted_width, untrusted_height) in
       (* sanitize end *)
       H.Wl_region.add h ~x ~y ~width ~height
     method on_subtract t ~untrusted_x ~untrusted_y ~untrusted_width ~untrusted_height =
-      V.check_x_y t (fun _ -> assert false) ~untrusted_x ~untrusted_y;
-      V.check_width_height_int32 t (fun _ -> assert false) ~untrusted_width ~untrusted_height;
+      V.check_x_y t bad_impl ~untrusted_x ~untrusted_y;
+      V.check_width_height_int32 t bad_impl ~untrusted_width ~untrusted_height;
       let (x, y, width, height) = (untrusted_x, untrusted_y, untrusted_width, untrusted_height) in
       (* sanitize end *)
       H.Wl_region.subtract h ~x ~y ~width ~height
