@@ -282,21 +282,27 @@ let validate_shm_parameters
       (shm: _ C.Wl_shm_pool.t) =
   V.check_width_height_int32 shm shm_pool_invalid_stride_str ~untrusted_width ~untrusted_height;
   (if untrusted_offset < 0l then
-    shm_pool_invalid_stride shm "Negative offset %ld" untrusted_offset);
-  (if untrusted_stride < 1l then
-    shm_pool_invalid_stride shm "Negative or zero stride %ld" untrusted_stride);
-  (if buffer_size < 0l then assert false (* bug *));
+    shm_pool_invalid_stride shm "Negative offset %ld" untrusted_offset
+  else if untrusted_stride < 1l then
+    shm_pool_invalid_stride shm "Negative or zero stride %ld" untrusted_stride
+  else if buffer_size < 0l then
+    assert false (* bug *));
   (* Overflow impossible: [Int32.max_int * Int32.max_int + Int32.max_int < Int64.max_int] *)
-  let area = Int64.mul (Int64.of_int32 untrusted_height) (Int64.of_int32 untrusted_stride) in
-  let end_pointer = Int64.add area (Int64.of_int32 untrusted_offset) in
-  if end_pointer > Int64.of_int32 buffer_size then
+  if (
+    let area = Int64.mul (Int64.of_int32 untrusted_height) (Int64.of_int32 untrusted_stride) in
+    Int64.add area (Int64.of_int32 untrusted_offset) > Int64.of_int32 buffer_size
+  ) then (
     shm_pool_invalid_stride shm "Buffer extends beyond end of pool: size %ldx%ld, \
                                  stride %ld, offset %ld, area %Ld, end pointer %Ld, buffer size %ld"
       untrusted_width untrusted_height untrusted_stride untrusted_offset
       area end_pointer buffer_size
-  else if not (Drm_format.validate_shm ~untrusted_offset ~untrusted_width ~untrusted_height
-          ~untrusted_stride ~untrusted_format) then
-    shm_pool_invalid_stride shm "Invalid buffer parameters for format"
+  ) else (
+    if not (Drm_format.validate_shm ~untrusted_offset ~untrusted_width ~untrusted_height
+            ~untrusted_stride ~untrusted_format) then
+      shm_pool_invalid_stride shm "Invalid buffer parameters for format"
+    else
+      ()
+  )
 
 (* wl_shm memory buffers are allocated by the client inside the guest and
    cannot be shared directly with the host. Instead, we allocate some host
@@ -627,10 +633,17 @@ let make_surface ~xwayland ~host_surface c =
       when_configured @@ fun () ->
       H.Wl_surface.set_opaque_region h ~region:(Option.map to_host region)
 
-    method on_set_buffer_scale _ ~untrusted_scale =
-      (* UNSAFE *)
-      let scale = untrusted_scale in
-      (* NO-sanitize end *)
+    method on_set_buffer_scale c ~untrusted_scale =
+      let scale =
+        if untrusted_scale < 1l then
+          C.Wl_surface.Errors.invalid_scale c ~message:"Scale cannot be negative"
+        else if untrusted_scale > 1024l then
+          (* Assume nobody needs a scale this large.  TODO: is this actually permitted? *)
+          Msg.bad_implementation "Scale greater than 1024 isn't allowed"
+        else
+          untrusted_scale
+      in
+      (* FIXME: defer request until surface commit *)
       when_configured @@ fun () ->
       H.Wl_surface.set_buffer_scale h ~scale
 

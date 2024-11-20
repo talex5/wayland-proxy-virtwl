@@ -112,12 +112,6 @@ get_format(uint32_t untrusted_format)
       return NULL; /* Color index cannot be used. */
    }
 
-   if (drm_format_info_block_height(info, 0) != 1) {
-      /* Multiple pixels per vertical block.  It is unclear whether the
-       * stride should be multiplied by the block height or not. */
-      return NULL;
-   }
-
    return info;
 }
 
@@ -148,23 +142,33 @@ validate_format(uint32_t untrusted_format, int32_t untrusted_width, int32_t untr
    /* Check that the block width is valid. */
    const unsigned int block_width = drm_format_info_block_width(info, 0);
    if (block_width < 1) {
+      /* Invalid block width. */
+      return NULL;
+   }
+
+   if ((untrusted_width % block_width) != 0) {
+      /* Image does not have a whole number of horizontal blocks. */
       return NULL;
    }
 
    /* Check that the block height is valid. */
    const unsigned int block_height = drm_format_info_block_height(info, 0);
-   if (block_height < 1) {
-      return NULL;
-   }
+   if (true) {
+      if (block_height != 1) {
+         /* Multiple pixels per vertical block.  It is unclear whether the
+          * stride should be multiplied by the block height or not. */
+         return NULL;
+      }
+   } else {
+      if (block_height < 1) {
+         /* Invalid block height */
+         return NULL;
+      }
 
-   if (untrusted_width % block_width) {
-      /* Image does not have a whole number of horizontal blocks. */
-      return NULL;
-   }
-
-   if (untrusted_height % block_height) {
-      /* Image does not have a whole number of vertical blocks. */
-      return NULL;
+      if (untrusted_height % block_height) {
+         /* Image does not have a whole number of vertical blocks. */
+         return NULL;
+      }
    }
 
    return info;
