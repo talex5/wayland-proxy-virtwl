@@ -106,7 +106,7 @@ CAMLprim value ocaml_get_page_size(void) {
 }
 
 CAMLprim value ocaml_drm_map(value v_fd, value v_handle) {
-  CAMLparam0();
+  CAMLparam1(v_handle);
   int ret;
   struct drm_virtgpu_map map = {
     .handle = Int32_val(v_handle),
@@ -129,7 +129,7 @@ static long cstruct_len(value v_cstruct) {
 }
 
 CAMLprim value ocaml_drm_exec_buffer(value v_fd, value v_cmd, value v_ring_idx, value v_handles) {
-  CAMLparam2(v_cmd, v_handles);
+  CAMLparam3(v_cmd, v_ring_idx, v_handles);
   int ret;
   struct drm_virtgpu_execbuffer exec = {
     .command = (uint64_t) cstruct_start(v_cmd),
@@ -157,7 +157,7 @@ CAMLprim value ocaml_drm_exec_buffer(value v_fd, value v_cmd, value v_ring_idx, 
 }
 
 CAMLprim value ocaml_drm_prime_handle_to_fd(value v_fd, value v_handle) {
-  CAMLparam0();
+  CAMLparam1(v_handle);
   int ret;
   int out_fd = -1;
   ret = drmPrimeHandleToFD(Int_val(v_fd), Int32_val(v_handle), DRM_CLOEXEC | DRM_RDWR, &out_fd);
@@ -180,7 +180,7 @@ CAMLprim value ocaml_drm_prime_fd_to_handle(value v_fd, value v_prime_fd) {
 }
 
 CAMLprim value ocaml_drm_resource_info(value v_fd, value v_gem_handle) {
-  CAMLparam0();
+  CAMLparam1(v_gem_handle);
   int ret;
   struct drm_virtgpu_resource_info drm_res_info = {0};
   drm_res_info.bo_handle = Int32_val(v_gem_handle);
@@ -192,7 +192,7 @@ CAMLprim value ocaml_drm_resource_info(value v_fd, value v_gem_handle) {
 }
 
 CAMLprim value ocaml_drm_wait(value v_fd, value v_gem_handle) {
-  CAMLparam0();
+  CAMLparam1(v_gem_handle);
   int ret;
   do {
     struct drm_virtgpu_3d_wait wait_3d = {
@@ -207,7 +207,7 @@ CAMLprim value ocaml_drm_wait(value v_fd, value v_gem_handle) {
 }
 
 CAMLprim value ocaml_close_gem_handle(value v_fd, value v_gem_handle) {
-  CAMLparam0();
+  CAMLparam1(v_gem_handle);
   int ret;
   struct drm_gem_close gem_close = {
     .handle = Int32_val(v_gem_handle),
@@ -313,7 +313,7 @@ CAMLprim value ocaml_safe_map_file(value vfd, value vkind, value vstart, value v
   return caml_unix_mapped_alloc2(flags, 1, addr, dim);
 }
 
-CAMLprim void ocaml_ba_unmap(value v)
+CAMLprim value ocaml_ba_unmap(value v)
 {
   struct caml_ba_array * b = Caml_ba_array_val(v);
   int i;
@@ -327,8 +327,10 @@ CAMLprim void ocaml_ba_unmap(value v)
      bigarrays don't resize when optimising. */
   b->flags = (b->flags & ~CAML_BA_MANAGED_MASK) | CAML_BA_EXTERNAL;
   /* Disallow all access via this bigarray */
-  for (i = 0; i < b->num_dims; i++) b->dim[i] = Long_val(0);
+  for (i = 0; i < b->num_dims; i++) b->dim[i] = 0;
   /* Tidy up (and let C users know that the data is gone). */
   b->data = NULL;
   b->proxy = NULL;
+
+  return Val_unit;
 }
