@@ -288,10 +288,9 @@ let validate_shm_parameters
   else if buffer_size < 0l then
     assert false (* bug *));
   (* Overflow impossible: [Int32.max_int * Int32.max_int + Int32.max_int < Int64.max_int] *)
-  if (
-    let area = Int64.mul (Int64.of_int32 untrusted_height) (Int64.of_int32 untrusted_stride) in
-    Int64.add area (Int64.of_int32 untrusted_offset) > Int64.of_int32 buffer_size
-  ) then (
+  let area = Int64.mul (Int64.of_int32 untrusted_height) (Int64.of_int32 untrusted_stride) in
+  let end_pointer = Int64.add area (Int64.of_int32 untrusted_offset) in
+  if end_pointer > Int64.of_int32 buffer_size then (
     shm_pool_invalid_stride shm "Buffer extends beyond end of pool: size %ldx%ld, \
                                  stride %ld, offset %ld, area %Ld, end pointer %Ld, buffer size %ld"
       untrusted_width untrusted_height untrusted_stride untrusted_offset
@@ -517,6 +516,10 @@ end = struct
     t
 end
 
+
+let unsafe_no_sanitize a = a
+(** This is [id] *)
+
 let make_surface ~xwayland ~host_surface c =
   let c = cv c in
   let h =
@@ -527,7 +530,8 @@ let make_surface ~xwayland ~host_surface c =
       method on_enter _ ~output = C.Wl_surface.enter c ~output:(to_client output)
       method on_leave _ ~output = C.Wl_surface.leave c ~output:(to_client output)
       method on_preferred_buffer_scale _ = C.Wl_surface.preferred_buffer_scale c
-      method on_preferred_buffer_transform _ = C.Wl_surface.preferred_buffer_transform c
+      method on_preferred_buffer_transform _ ~transform =
+        C.Wl_surface.preferred_buffer_transform c ~transform
     end
   in
   let h = Proxy.cast_version h in
@@ -649,7 +653,7 @@ let make_surface ~xwayland ~host_surface c =
 
     method on_set_buffer_transform _ ~untrusted_transform =
       (* UNSAFE *)
-      let transform = untrusted_transform in
+      let transform = unsafe_no_sanitize untrusted_transform in
       (* NO-sanitize end *)
       when_configured @@ fun () ->
       H.Wl_surface.set_buffer_transform h ~transform
@@ -742,9 +746,6 @@ let make_shm_buffer b proxy =
     method on_destroy _ = Shm.destroy_buffer b
   end
 
-external unsafe_no_sanitize: 'a -> 'a = "%identity"
-(** This is [Obj.magic] used (safely) at type ['a -> 'a] *)
-
 (* todo: this all needs to be more robust.
    Also, sealing? *)
 let make_shm_pool_virtwl ~virtio_gpu ~host_shm proxy ~fd:client_fd ~size:orig_size =
@@ -801,7 +802,8 @@ let make_output ~xwayland bind c =
       inherit [_] H.Wl_output.v1
       method! user_data = user_data
       method on_done _ = C.Wl_output.done_ (Proxy.cast_version c)
-      method on_geometry _ = C.Wl_output.geometry c
+      method on_geometry _ ~x ~y ~physical_width ~physical_height ~subpixel ~make ~model ~transform =
+        C.Wl_output.geometry c ~x ~y ~physical_width ~physical_height ~subpixel ~make ~model ~transform
       method on_mode _ = C.Wl_output.mode c
       method on_name _ ~name = C.Wl_output.name c ~name
       method on_description _ ~description = C.Wl_output.description c ~description
@@ -942,7 +944,21 @@ let make_shm ~virtio_gpu bind c =
   let c = Proxy.cast_version c in
   let h = bind @@ object
       inherit [_] H.Wl_shm.v1
-      method on_format _ ~format = C.Wl_shm.format c ~format
+      method on_format p ~format =
+        (* Check that the format is one that can be supported. *)
+        if format = 0l || format = 1l then (
+          (* Do nothing.  This message is redundant. *)
+        ) else if Relay_stubs.validate_shm_format ~untrusted_format:format then (
+          (* Format can be used and won't trigger spurious protocol errors. *)
+          match ((C.Wl_shm.Format.of_int32 ~_proxy:p ~value:format): Wayland_proto.Wl_shm.Format.t) with
+          | _ -> C.Wl_shm.format c ~format
+          | exception Msg.Error _ -> (
+          (* Format will be rejected during message unmarshalling. *)
+          )
+        ) else (
+          (* Format cannot be used and attempts to use it will trigger a protocol error.
+           * Do not inform the client of this format. *)
+        )
     end
   in
   Proxy.Handler.attach c @@ object
@@ -1198,7 +1214,8 @@ let make_toplevel ~tag ~host_toplevel c =
     method on_resize _ ~seat ~(untrusted_serial:int32) ~(untrusted_edges): unit =
       let serial = validate_serial ~untrusted_serial in
       (* FIXME: validate edges *)
-      H.Xdg_toplevel.resize h ~seat:(to_host seat) ~serial ~edges:untrusted_edges
+      let edges = unsafe_no_sanitize untrusted_edges in
+      H.Xdg_toplevel.resize h ~seat:(to_host seat) ~serial ~edges
     method on_set_app_id _ ~(untrusted_app_id:string): unit =
       (* TODO: validate app ID *)
       H.Xdg_toplevel.set_app_id h ~app_id:untrusted_app_id
@@ -1290,7 +1307,8 @@ let make_positioner ~host_positioner c =
     method on_destroy = delete_with H.Xdg_positioner.destroy h
     method on_set_anchor _ ~(untrusted_anchor:Protocols.Xdg_positioner.Anchor.t): unit =
       (* TODO: validate anchor *)
-      H.Xdg_positioner.set_anchor h ~anchor:untrusted_anchor
+      let anchor = unsafe_no_sanitize untrusted_anchor in
+      H.Xdg_positioner.set_anchor h ~anchor
     method on_set_anchor_rect p
              ~(untrusted_x:int32)
              ~(untrusted_y:int32)
@@ -1304,6 +1322,7 @@ let make_positioner ~host_positioner c =
       (* Validated by generated code.  FIXME: better error. *)
       H.Xdg_positioner.set_constraint_adjustment h ~constraint_adjustment:untrusted_constraint_adjustment
     method on_set_gravity _ ~(untrusted_gravity:Protocols.Xdg_positioner.Gravity.t): unit =
+      (* TODO: validate gravity *)
       let gravity = unsafe_no_sanitize untrusted_gravity in
       H.Xdg_positioner.set_gravity h ~gravity
     method on_set_offset p ~(untrusted_x:int32) ~(untrusted_y:int32): unit =
@@ -1511,11 +1530,10 @@ let make_data_offer ~client_offer h =
         let fd = match Relay_stubs.validate_pipe untrusted_fd with
         (* FIXME: better logging *)
         | exception Unix.Unix_error _ -> Wayland.Msg.bad_implementation "problem validating pipe"
-        | 0 -> untrusted_fd
-        | -1 -> Wayland.Msg.bad_implementation "File descriptor is a socket, but not AF_UNIX socket"
-        | -2 -> Wayland.Msg.bad_implementation "File descriptor is an AF_UNIX socket, but not a stream socket"
-        | -3 -> Wayland.Msg.bad_implementation "File descriptor is neither a pipe nor a socket"
-        | _ -> assert false
+        | Success -> untrusted_fd
+        | Non_AF_UNIX_Socket -> Wayland.Msg.bad_implementation "File descriptor is a socket, but not AF_UNIX socket"
+        | Non_stream_AF_UNIX_Socket -> Wayland.Msg.bad_implementation "File descriptor is an AF_UNIX socket, but not a stream socket"
+        | Neither_pipe_nor_socket -> Wayland.Msg.bad_implementation "File descriptor is neither a pipe nor a socket"
         in
         (* TODO: check that the MIME type is valid *)
         Fun.protect

@@ -11,59 +11,13 @@
 #include <caml/mlvalues.h>
 #include <caml/alloc.h>
 #include <caml/unixsupport.h>
-#if 0
-/** Notes:
- *
- * - I915_*_TILED_CCS formats must have a pitch that is a multiple of
- *   128 bytes.  They must be plane 1, with a plane 0 that is
- *   Y/Yf tiled.  Plane 0 must be 8:8:8:8 with Y or Yf tiling.
- *   Each 64 bytes in plane 1 must match 1024 bytes in plane 0,
- *   so plane 0 must have a stride that is 4 times that of plane 1.
- * - I915_*_RC_CCS formats must be a multiple of 64 bytes and at
- *   plane index 1.
- */
-bool validate_planes(uint32_t formats[static 4], uint64_t modifiers[static 4],
-                     uint32_t stride[static 4], uint64_t sizes[static 4],
-                     uint32_t width, uint32_t height,
-                     uint32_t plane_count)
-{
-   if (plane_count > 4)
-      return false; /* too many */
-
-   for (uint32_t i = 0; i < plane_count; ++i) {
-      switch (modifiers[i]) {
-      case I915_FORMAT_MOD_Y_TILED_CCS:
-      case I915_FORMAT_MOD_Yf_TILED_CCS:
-         if (i != 1 || plane_count != 2)
-            return false; /* bad! */
-         if (modifiers[0] != modifiers[i] - 2)
-            return false; /* mismatch between plane 0 and plane 1 */
-         if (stride[0] % 1024 != 0 || stride[1] != stride[0] / 8)
-            return false; /* bad stride */
-         if (height % 512 != 0)
-            return false; /* bad height */
-         /* TODO: check other requirements */
-         break;
-      case I915_FORMAT_MOD_Y_TILED_GEN12_RC_CCS:
-         if (i != 1 || plane_count != 2)
-            return false; /* bad! */
-         if (modifiers[0] != I915_FORMAT_MOD_Y_TILED)
-            return false; /* bad! */
-         if (stride[0] % (4096 * 4))
-            return false; /* main surface pitch not multiple of 4 Y tile widths */
-         break;
-      }
-   }
-   return true; /* TODO catch more bad cases */
-}
-#endif
 
 /**
  * Get the number of bytes remaining in a file descriptor after the provided offset.
  *
  * @param fd The file descriptor cast to a long.
  * @param untrusted_offset The offset claimed by the client.
- * @return The number of bytes after untrusted_offset, or 0 on any error.
+ * @return The number of bytes after untrusted_offset, or -1 on any error.
  *         Wayland buffers cannot have zero pixels, so 0 bytes remaining
  *         is itself an error.
  */
@@ -75,8 +29,8 @@ get_fd_size(long fd)
    }
 
    off_t untrusted_raw_size = lseek((int)fd, 0, SEEK_END);
-   if (untrusted_raw_size < 0 || untrusted_raw_size > INT64_MAX) {
-      /* lseek() failed or size too large for int64_t */
+   if (untrusted_raw_size < 1 || untrusted_raw_size > INT64_MAX) {
+      /* lseek() failed, size too large for int64_t, or size zero */
       return -1;
    }
 
@@ -98,6 +52,19 @@ wayland_proxy_virtwl_check_fd_offset_byte(value fd)
 static const struct drm_format_info *
 get_format(uint32_t untrusted_format)
 {
+   switch (untrusted_format) {
+   case DRM_FORMAT_ARGB8888:
+   case DRM_FORMAT_XRGB8888:
+      return NULL;
+   case 0:
+      untrusted_format = DRM_FORMAT_ARGB8888;
+      break;
+   case 1:
+      untrusted_format = DRM_FORMAT_XRGB8888;
+      break;
+   default:
+      break;
+   }
    const struct drm_format_info *const info = drm_format_info(untrusted_format);
    if (info == NULL) {
       /* Unknown format, cannot validate. */
@@ -115,8 +82,47 @@ get_format(uint32_t untrusted_format)
    return info;
 }
 
+static bool
+validate_format_static(uint32_t const untrusted_format)
+{
+   const struct drm_format_info *const info = get_format(untrusted_format);
+   if (info == NULL) {
+      return false;
+   }
+
+   /* Check that the block width is valid. */
+   const unsigned int block_width = drm_format_info_block_width(info, 0);
+   if (block_width < 1) {
+      /* Invalid block width. */
+      return false;
+   }
+
+   /* Check that the block height is valid. */
+   const unsigned int block_height = drm_format_info_block_height(info, 0);
+   if (block_height != 1) {
+      /* Multiple pixels per vertical block.  It is unclear whether the
+       * stride should be multiplied by the block height or not. */
+      return false;
+   }
+   return true;
+}
+
+CAMLprim value
+wayland_proxy_virtwl_validate_shm_format_native(int32_t untrusted_format)
+{
+   return Val_bool(validate_format_static(untrusted_format));
+}
+
+CAMLprim value
+wayland_proxy_virtwl_validate_shm_format_byte(value v)
+{
+   return wayland_proxy_virtwl_validate_shm_format_native(Int32_val(v));
+}
+
 static const struct drm_format_info *
-validate_format(uint32_t untrusted_format, int32_t untrusted_width, int32_t untrusted_height)
+validate_format(uint32_t const untrusted_format,
+                int32_t const untrusted_width,
+                int32_t const untrusted_height)
 {
    if (untrusted_width < 1 || untrusted_height < 1) {
       return NULL; /* No pixels. */
@@ -188,7 +194,7 @@ wayland_proxy_virtwl_validate_pipe(value arg)
       caml_unix_error(errno, "validate pipe: fstat()", Nothing);
    }
    if (res != 0)
-      caml_fatal_error("fstat() returned %d, not 0 or 1 (kernel bug?)", res);
+      caml_fatal_error("fstat() returned %d, not 0 or -1 (kernel bug?)", res);
    switch (stat_buf.st_mode & S_IFMT) {
    case S_IFIFO:
       return Val_int(0);
@@ -201,18 +207,18 @@ wayland_proxy_virtwl_validate_pipe(value arg)
       if (len != sizeof(domain))
          caml_fatal_error("bad socklen_t (%ju) set by getsockopt()", (uintmax_t)len);
       if (domain != AF_UNIX)
-         return Val_int(-1);
+         return Val_int(1);
       res = getsockopt(v, SOL_SOCKET, SO_TYPE, &domain, &len);
       if (res == -1)
          caml_unix_error(errno, "validate pipe: getsockopt(SOL_SOCKET, SO_TYPE)", Nothing);
       if (len != sizeof(domain))
          caml_fatal_error("bad socklen_t (%ju) set by getsockopt()", (uintmax_t)len);
       if (domain != SOCK_STREAM)
-         return Val_int(-2);
+         return Val_int(2);
       return Val_int(0);
    }
    default:
-      return Val_int(-3);
+      return Val_int(3);
    }
 }
 
@@ -225,20 +231,6 @@ validate_shm(int32_t untrusted_offset,
    /* Offset can't be negative */
    if (untrusted_offset < 0) {
       return false;
-   }
-
-   switch (untrusted_format) {
-   case DRM_FORMAT_ARGB8888:
-   case DRM_FORMAT_XRGB8888:
-      return false;
-   case 0:
-      untrusted_format = DRM_FORMAT_ARGB8888;
-      break;
-   case 1:
-      untrusted_format = DRM_FORMAT_XRGB8888;
-      break;
-   default:
-      break;
    }
 
    /* This checks that untrusted_width and untrusted_height are both at least 1

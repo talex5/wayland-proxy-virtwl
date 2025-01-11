@@ -18,3 +18,5 @@ case.c: datum.c Makefile
 	:finish'
 	}
 	mv case.c.tmp case.c
+clean:
+	rm datum case.c
