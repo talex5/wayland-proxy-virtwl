@@ -266,8 +266,6 @@ int main(void) {
 	  return EXIT_FAILURE;
 	}
       }
-      fprintf(stderr, "Processing format %s (fourcc_code('%c', '%c', '%c', '%c')) (index %lu)\n",
-	      name, (char)chars[0], (char)chars[1], (char)chars[2], (char)chars[3], i);
     }
     if (printf("  { .format           = %s\n"
 	       "  , .depth            = %" PRIu8 "\n"
@@ -327,7 +325,26 @@ int main(void) {
 	       formats[i].is_color_indexed ? "true" : "false") < 0)
       exit(EXIT_FAILURE);
   }
-  fputs("};\n", stdout);
+  if (fputs("};\n"
+            "/**\n"
+            " * drm_format_info - query information for a given format\n"
+            " * @param format pixel format (DRM_FORMAT_*)\n"
+            " *\n"
+            " * @return\n"
+            " * The instance of struct drm_format_info that describes the pixel format, or\n"
+            " * NULL if the format is unsupported.\n"
+            " */\n"
+            "const struct drm_format_info *drm_format_info(uint32_t format)\n"
+            "{\n"
+            "  switch (format) {\n", stdout) == EOF)
+    return EXIT_FAILURE;
+  for (size_t z = 0; z < ARRAY_SIZE(formats); ++z) {
+    const char *const name = lookup(formats[z].format);
+    if (printf("  case %s: return formats + %zu;\n", name, z) < 0)
+      return EXIT_FAILURE;
+  }
+  if (fputs("  default: return NULL;\n  }\n}\n", stdout) == EOF)
+    return EXIT_FAILURE;
   if (fflush(NULL) || ferror(stdout))
     return EXIT_FAILURE;
   return EXIT_SUCCESS;

@@ -30,28 +30,6 @@
 #define ARRAY_SIZE(x) (sizeof(x)/sizeof((x)[0]))
 
 /**
- * drm_format_info - query information for a given format
- * @param format pixel format (DRM_FORMAT_*)
- *
- * @return
- * The instance of struct drm_format_info that describes the pixel format, or
- * NULL if the format is unsupported.
- */
-const struct drm_format_info *drm_format_info(uint32_t format)
-{
-
-	unsigned int i;
-	(void)formats;
-
-	for (i = 0; i < ARRAY_SIZE(formats); ++i) {
-		if (formats[i].format == format)
-			return &formats[i];
-	}
-
-	return NULL;
-}
-
-/**
  * drm_format_info_block_width - width in pixels of block.
  * @info: pixel format info
  * @plane: plane index
