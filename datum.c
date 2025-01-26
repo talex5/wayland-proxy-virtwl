@@ -231,21 +231,21 @@ static void print_buffer(const uint8_t buffer[static 4], uint8_t num_planes, con
   for (int i = 0; i < 4; ++i) {
     if (i >= num_planes) {
       if (buffer[i] != 0)
-	abort();
+        abort();
       buf[i] = 0;
     } else {
       buf[i] = buffer[i] > 0 ? buffer[i] : 1;
     }
   }
   printf("  , .%-*s = { %" PRIu8 ", %" PRIu8 ", %" PRIu8 ", %" PRIu8 " }\n",
-	 (int)strlen("is_color_indexed"), name, buf[0], buf[1], buf[2], buf[3]);
+         (int)strlen("is_color_indexed"), name, buf[0], buf[1], buf[2], buf[3]);
 }
 
 int main(void) {
   printf("#include <stdbool.h>\n"
-	 "#include <drm/drm_fourcc.h>\n"
-	 "#include \"drm_fourcc.h\"\n"
-	 "\n");
+         "#include <drm/drm_fourcc.h>\n"
+         "#include \"drm_fourcc.h\"\n"
+         "\n");
   printf("struct drm_format_info formats[%zu] = {\n", ARRAY_SIZE(formats));
   for (size_t z = 0; z < ARRAY_SIZE(formats); ++z) {
     const size_t i = z;
@@ -255,22 +255,22 @@ int main(void) {
     {
       const uint32_t lowered_format = format_number & ~(uint32_t)DRM_FORMAT_BIG_ENDIAN;
       const uint8_t chars[4] = {
-	lowered_format & 0xFF,
-	(lowered_format >> 8) & 0xFF,
-	(lowered_format >> 16) & 0xFF,
-	(lowered_format >> 24) & 0xFF,
+        lowered_format & 0xFF,
+        (lowered_format >> 8) & 0xFF,
+        (lowered_format >> 16) & 0xFF,
+        (lowered_format >> 24) & 0xFF,
       };
       for (int ord = 0; ord < 4; ++ord) {
-	if (chars[ord] < (uint8_t)' ' || chars[ord] > (uint8_t)'~') {
-	  fprintf(stderr, "Bad DRM format code %s\n", name);
-	  return EXIT_FAILURE;
-	}
+        if (chars[ord] < (uint8_t)' ' || chars[ord] > (uint8_t)'~') {
+          fprintf(stderr, "Bad DRM format code %s\n", name);
+          return EXIT_FAILURE;
+        }
       }
     }
     if (printf("  { .format           = %s\n"
-	       "  , .depth            = %" PRIu8 "\n"
-	       "  , .num_planes       = %" PRIu8 "\n",
-	       name, formats[i].depth, num_planes) < 0) {
+               "  , .depth            = %" PRIu8 "\n"
+               "  , .num_planes       = %" PRIu8 "\n",
+               name, formats[i].depth, num_planes) < 0) {
       exit(EXIT_FAILURE);
     }
     if (num_planes < 1) {
@@ -300,11 +300,11 @@ int main(void) {
       uint8_t const char_per_block = formats[i].char_per_block[plane];
       const uint8_t block_width = AMAX(formats[i].block_w[plane], 1);
       const uint8_t block_height = AMAX(formats[i].block_h[plane], 1);
-      if (0 && char_per_block * 8 % ((uint32_t)block_width * (uint32_t)block_height) != 0) {
-	fprintf(stderr, "Bad info in plane %d for format %s (%" PRIu32 "), row %lu: char per block (%" PRIu8
-		") not multiple of width (%" PRIu8 ") * height (%" PRIu8 ")\n",
-		plane, name, format_number, i, char_per_block, block_width, block_height);
-	return EXIT_FAILURE;
+      if (1 && char_per_block * 8 % ((uint32_t)block_width * (uint32_t)block_height) != 0) {
+        fprintf(stderr, "Bad info in plane %d for format %s (%" PRIu32 "), row %lu: char per block (%" PRIu8
+                ") not multiple of width (%" PRIu8 ") * height (%" PRIu8 ")\n",
+                plane, name, format_number, i, char_per_block, block_width, block_height);
+        return EXIT_FAILURE;
       }
     }
 #define X(field) print_buffer(formats[i].field, formats[i].num_planes, #field)
@@ -313,16 +313,16 @@ int main(void) {
     X(block_h);
 #undef X
     if (printf("  , .hsub             = %" PRIu8 "\n"
-	       "  , .vsub             = %" PRIu8 "\n"
-	       "  , .has_alpha        = %s\n"
-	       "  , .is_yuv           = %s\n"
-	       "  , .is_color_indexed = %s\n"
-	       "  },\n",
-	       formats[i].hsub,
-	       formats[i].vsub,
-	       formats[i].has_alpha ? "true" : "false",
-	       formats[i].is_yuv ? "true" : "false",
-	       formats[i].is_color_indexed ? "true" : "false") < 0)
+               "  , .vsub             = %" PRIu8 "\n"
+               "  , .has_alpha        = %s\n"
+               "  , .is_yuv           = %s\n"
+               "  , .is_color_indexed = %s\n"
+               "  },\n",
+               formats[i].hsub,
+               formats[i].vsub,
+               formats[i].has_alpha ? "true" : "false",
+               formats[i].is_yuv ? "true" : "false",
+               formats[i].is_color_indexed ? "true" : "false") < 0)
       exit(EXIT_FAILURE);
   }
   if (fputs("};\n"
