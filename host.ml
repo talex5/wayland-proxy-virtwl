@@ -9,22 +9,19 @@ type t = {
 
 (* Spawn a fiber talking the Wayland protocol over [transport].
    [sw] will fail if a protocol error occurs. *)
-let connect ?virtio_gpu ~sw transport =
-  let display = Wayland.Client.connect ~sw ~trace:(module Trace.Host) transport in
+let connect ?error_callback ?virtio_gpu ~sw transport =
+  let display = Wayland.Client.connect ~sw ~trace:(module Trace.Host) ?error_callback transport in
   let registry = Wayland.Registry.of_display display in
   let _dma =
-    virtio_gpu |> Option.map @@ fun virtio_gpu ->
+    virtio_gpu |> Option.map @@ fun _ ->
     let dma = Virtio_gpu.Wayland_dmabuf.create display registry in
     match dma with
     | None ->
       Log.info (fun f -> f "Host does not support dmabuf");
       None
     | Some dma ->
-      let supported = Virtio_gpu.probe_drm virtio_gpu dma in
-      if supported then (
         Log.warn (fun f -> f "Host is using dmabuf - this probably won't work yet");
         Some dma
-      ) else None
   in
   {
     virtio_gpu;

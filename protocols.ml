@@ -9,3 +9,4 @@ include Wayland_protocols.Server_decoration_proto
 include Wayland_protocols.Xdg_decoration_unstable_v1_proto
 include Wayland_protocols.Relative_pointer_unstable_v1_proto
 include Wayland_protocols.Pointer_constraints_unstable_v1_proto
+include Wayland_protocols.Linux_dmabuf_v1_proto

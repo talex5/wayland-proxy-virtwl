@@ -88,7 +88,7 @@ module HD = struct
     mutable data : surface_data;
   }
 
-  type 'a t = 
+  type 'a t =
     | Surface        : 'v surface                            -> [`Wl_surface]                     t
     | Data_offer     : 'v C.Wl_data_offer.t                  -> [`Wl_data_offer]                  t
     | Gtk_data_offer : 'v C.Gtk_primary_selection_offer.t    -> [`Zwp_primary_selection_offer_v1] t
@@ -107,7 +107,10 @@ module CD = struct
 
   type 'v buffer = [
     | `Virtwl of 'v virtwl_buffer Lazy.t
-    | `Direct of 'v H.Wl_buffer.t
+    | `Direct of 'v H.Wl_buffer.t (* This also includes dma buffers,
+                                     whether direct or otherwise!
+                                     All of the complexity is handled entirely by
+                                     the guest kernel. *)
   ]
 
   type surface_state =
@@ -139,7 +142,7 @@ end
 
 (* Note: the role here is our role: [`Server] data is attached to proxies to
  our clients (where we are the server), while [`Client] data is attached to host objects. *)
-type ('a, 'role) user_data = 
+type ('a, 'role) user_data =
   | Client_data      : 'a CD.t -> ('a, [`Server]) user_data
   | Host_data        : 'a HD.t -> ('a, [`Client]) user_data
 
@@ -187,6 +190,48 @@ let to_host (type a) (c : (a, 'v, [`Server]) Proxy.t) : (a, 'v, [`Client]) Proxy
     (* Here, a client Gtk corresponds to a host Zwp, so the types aren't right. *)
     failwith "Can't use to_host with GTK translation"
 
+(* Validation *)
+module V = struct
+  let max_window_width_int32 = 16384l
+  let max_window_height_int32 = 6144l
+  let check_width_height_int32 t raise ~untrusted_width ~untrusted_height =
+    if untrusted_width <= 0l then (
+      raise t ~message:"Width is negative or 0"
+    ) else if untrusted_width > max_window_width_int32 then (
+      raise t ~message:"Width is excessive"
+    ) else if untrusted_height <= 0l then (
+      raise t ~message:"Height is negative or 0"
+    ) else if untrusted_height > max_window_height_int32 then (
+      raise t ~message:"Height is excessive"
+    ) else (
+      ()
+    )
+  let check_max_width_height t raise ~untrusted_width ~untrusted_height =
+    if untrusted_width < 0l then (
+      raise t ~message:(Format.asprintf "Width %ld is negative" untrusted_width)
+    ) else if untrusted_width > max_window_width_int32 then (
+      raise t ~message:(Format.asprintf "Width %ld is excessive" untrusted_width)
+    ) else if untrusted_height < 0l then (
+      raise t ~message:(Format.asprintf "Height %ld is negative" untrusted_height)
+    ) else if untrusted_height > max_window_height_int32 then (
+      raise t ~message:(Format.asprintf "Height %ld is excessive" untrusted_height)
+    ) else (
+      ()
+    )
+  let check_x_y t raise ~untrusted_x ~untrusted_y =
+    if untrusted_x < Int32.sub 0l max_window_width_int32 then (
+      raise t ~message:(Format.asprintf "X %ld is too negative" untrusted_x)
+    ) else if untrusted_x > max_window_width_int32 then (
+      raise t ~message:(Format.asprintf "X %ld is excessive" untrusted_x)
+    ) else if untrusted_y < Int32.sub 0l max_window_height_int32 then (
+      raise t ~message:(Format.asprintf "Y %ld is too negative" untrusted_y)
+    ) else if untrusted_y > max_window_height_int32 then (
+      raise t ~message:(Format.asprintf "Y %ld is excessive" untrusted_y)
+    ) else (
+      ()
+    )
+end
+
 (* When the client asks to destroy something, delay the ack until the host object is destroyed.
    This means the client sees events in the usual order, and means we can continue forwarding
    any events the host sends before hearing about the deletion. *)
@@ -194,16 +239,69 @@ let delete_with fn host client =
   Proxy.on_delete host (fun () -> if Proxy.transport_up client then Proxy.delete client);
   fn host
 
+let bad_impl _ ~message = Msg.bad_implementation message
+
 let make_region ~host_region r =
   let h = host_region @@ new H.Wl_region.v1 in
   let user_data = client_data (Region h) in
   Proxy.Handler.attach r @@ object
     inherit [_] C.Wl_region.v1
     method! user_data = user_data
-    method on_add _ = H.Wl_region.add h
-    method on_subtract _ = H.Wl_region.subtract h
+    method on_add t ~untrusted_x ~untrusted_y ~untrusted_width ~untrusted_height =
+      V.check_x_y t bad_impl ~untrusted_x ~untrusted_y;
+      V.check_width_height_int32 t bad_impl ~untrusted_width ~untrusted_height;
+      let (x, y, width, height) = (untrusted_x, untrusted_y, untrusted_width, untrusted_height) in
+      (* sanitize end *)
+      H.Wl_region.add h ~x ~y ~width ~height
+    method on_subtract t ~untrusted_x ~untrusted_y ~untrusted_width ~untrusted_height =
+      V.check_x_y t bad_impl ~untrusted_x ~untrusted_y;
+      V.check_width_height_int32 t bad_impl ~untrusted_width ~untrusted_height;
+      let (x, y, width, height) = (untrusted_x, untrusted_y, untrusted_width, untrusted_height) in
+      (* sanitize end *)
+      H.Wl_region.subtract h ~x ~y ~width ~height
     method on_destroy = delete_with H.Wl_region.destroy h
   end
+
+let shm_pool_invalid_stride (proxy:_ C.Wl_shm_pool.t) =
+  Format.kasprintf (fun message -> Proxy.post_error proxy ~code:1l ~message)
+  [@@ocaml.inline never]
+(** [shm_pool_invalid_stride] disconnects the client with an invalid_stride error *)
+
+let shm_pool_invalid_stride_str proxy =
+  Proxy.post_error proxy ~code:1l
+  [@@ocaml.inline never]
+(** [shm_pool_invalid_stride_str] disconnects the client with an invalid_stride error *)
+
+let validate_shm_parameters
+      ~(buffer_size:int32)
+      ~(untrusted_offset:int32)
+      ~(untrusted_width:int32)
+      ~(untrusted_height:int32)
+      ~(untrusted_stride:int32)
+      ~(untrusted_format:int32)
+      (shm: _ C.Wl_shm_pool.t) =
+  V.check_width_height_int32 shm shm_pool_invalid_stride_str ~untrusted_width ~untrusted_height;
+  (if untrusted_offset < 0l then
+    shm_pool_invalid_stride shm "Negative offset %ld" untrusted_offset
+  else if untrusted_stride < 1l then
+    shm_pool_invalid_stride shm "Negative or zero stride %ld" untrusted_stride
+  else if buffer_size < 0l then
+    assert false (* bug *));
+  (* Overflow impossible: [Int32.max_int * Int32.max_int + Int32.max_int < Int64.max_int] *)
+  let area = Int64.mul (Int64.of_int32 untrusted_height) (Int64.of_int32 untrusted_stride) in
+  let end_pointer = Int64.add area (Int64.of_int32 untrusted_offset) in
+  if end_pointer > Int64.of_int32 buffer_size then (
+    shm_pool_invalid_stride shm "Buffer extends beyond end of pool: size %ldx%ld, \
+                                 stride %ld, offset %ld, area %Ld, end pointer %Ld, buffer size %ld"
+      untrusted_width untrusted_height untrusted_stride untrusted_offset
+      area end_pointer buffer_size
+  ) else (
+    if not (Drm_format.validate_shm ~untrusted_offset ~untrusted_width ~untrusted_height
+            ~untrusted_stride ~untrusted_format) then
+      shm_pool_invalid_stride shm "Invalid buffer parameters for format"
+    else
+      ()
+  )
 
 (* wl_shm memory buffers are allocated by the client inside the guest and
    cannot be shared directly with the host. Instead, we allocate some host
@@ -240,11 +338,12 @@ module Shm : sig
   val resize : t -> int32 -> unit
 
   val create_buffer : t ->
-    offset:int32 ->
-    width:int32 ->
-    height:int32 ->
-    stride:int32 ->
-    format:Protocols.Wl_shm.Format.t ->
+    untrusted_offset:int32 ->
+    untrusted_width :int32 ->
+    untrusted_height:int32 ->
+    untrusted_stride:int32 ->
+    untrusted_format:int32 ->
+    [>`V1] C.Wl_shm_pool.t ->
     [`V1] C.Wl_buffer.t ->
     buffer
   (** [create_buffer t ... proxy] allocates a region of [t].
@@ -265,6 +364,7 @@ end = struct
     host_memory_pool : Cstruct.buffer;     (* The host's memory mapped into our address space *)
   }
 
+
   type t = {
     host_shm : [`V1|`V2] H.Wl_shm.t;
     virtio_gpu : Virtio_gpu.t;
@@ -274,14 +374,14 @@ end = struct
     mutable mapping : mapping option;           (* If [None] then map when needed *)
   }
 
-  let with_memory_fd t ~size fn =
+  let with_memory_fd t ~size ~(gpu:bool) fn =
     let query = {
       Virtio_gpu.Dev.
       width = Int32.of_int size;
       height = 1l;
       drm_format = Virtio_gpu.Drm_format.r8;
     } in
-    let image = Virtio_gpu.alloc t.virtio_gpu query in
+    let image = Virtio_gpu.alloc t.virtio_gpu ~gpu query in
     match fn image with
     | x -> Unix.close image.fd; x
     | exception ex -> Unix.close image.fd; raise ex
@@ -297,7 +397,7 @@ end = struct
       let size = Int32.to_int t.size in
       let client_memory_pool = Unix.map_file client_fd Bigarray.Char Bigarray.c_layout true [| size |] in
       let host_pool, host_memory_pool =
-        with_memory_fd t ~size (fun { Virtio_gpu.Dev.fd; host_size; offset; _ } ->
+        with_memory_fd t ~size ~gpu:false (fun { Virtio_gpu.Dev.fd; host_size; offset; _ } ->
             let host_pool = H.Wl_shm.create_pool t.host_shm ~fd ~size:t.size @@ new H.Wl_shm_pool.v1 in
             let host_memory = Virtio_gpu.Utils.safe_map_file fd
                 ~kind:Bigarray.Char
@@ -334,22 +434,46 @@ end = struct
     )
 
   let dec_ref t =
-    assert (t.ref_count > 0);
-    t.ref_count <- t.ref_count - 1;
-    if t.ref_count = 0 then (
-      Unix.close (Option.get t.client_fd);
-      t.client_fd <- None;
-      clear_mapping t
+    let ref_count = t.ref_count in
+    if ref_count < 1 then
+      assert false (* bug! *)
+    else (
+      let ref_count = ref_count - 1 in
+      t.ref_count <- ref_count;
+      if ref_count = 0 then (
+        Unix.close (Option.get t.client_fd);
+        t.client_fd <- None;
+        clear_mapping t
+      )
     )
 
-  let create_buffer t ~offset ~width ~height ~stride ~format buffer : buffer =
-    assert (t.ref_count > 0);   (* The shm_pool proxy must exist to call this. *)
-    t.ref_count <- t.ref_count + 1;
+  let create_buffer (t: t) ~untrusted_offset ~untrusted_width ~untrusted_height
+        ~untrusted_stride ~untrusted_format
+        (shm: _ C.Wl_shm_pool.t)
+        (buffer: _ C.Wl_buffer.t) : buffer =
+    validate_shm_parameters ~buffer_size:t.size ~untrusted_offset ~untrusted_width ~untrusted_height
+        ~untrusted_stride ~untrusted_format shm;
+    let (offset, width, height, stride, format) =
+      (untrusted_offset, untrusted_width, untrusted_height, untrusted_stride, untrusted_format) in
+    assert (t.ref_count > 0);
+    let () =
+      let ref_count = t.ref_count in
+      if ref_count < 1 then (
+        assert false (* The shm_pool proxy must exist to call this. *)
+      ) else if ref_count > Int.max_int - 1 then (
+        shm_pool_invalid_stride_str shm
+          ~message:"Reference count overflow" (* TODO: better error for refcount overflow *)
+      ) else (
+        t.ref_count <- ref_count + 1
+      )
+    in
     Proxy.on_delete buffer (fun () -> dec_ref t);
     let data =
       lazy (
         (* Forced by [map_buffer] when the the buffer is attached to a surface,
-           so buffer proxy still exists. *)
+           so buffer proxy still exists.  Overflow is impossible because
+           [Drm_format.validate_shm] checks for it.
+         *)
         let len = Int32.to_int height * Int32.to_int stride in
         let mapping = get_mapping t in
         let host_memory = Cstruct.of_bigarray mapping.host_memory_pool ~off:(Int32.to_int offset) ~len in
@@ -359,7 +483,7 @@ end = struct
           @@ object
             inherit [_] H.Wl_buffer.v1
             method on_release _ = C.Wl_buffer.release buffer
-          end 
+          end
         in
         { CD.host_memory; client_memory; host_buffer }
       )
@@ -392,6 +516,10 @@ end = struct
     t
 end
 
+
+let unsafe_no_sanitize a = a
+(** This is [id] *)
+
 let make_surface ~xwayland ~host_surface c =
   let c = cv c in
   let h =
@@ -402,7 +530,8 @@ let make_surface ~xwayland ~host_surface c =
       method on_enter _ ~output = C.Wl_surface.enter c ~output:(to_client output)
       method on_leave _ ~output = C.Wl_surface.leave c ~output:(to_client output)
       method on_preferred_buffer_scale _ = C.Wl_surface.preferred_buffer_scale c
-      method on_preferred_buffer_transform _ = C.Wl_surface.preferred_buffer_transform c
+      method on_preferred_buffer_transform _ ~transform =
+        C.Wl_surface.preferred_buffer_transform c ~transform
     end
   in
   let h = Proxy.cast_version h in
@@ -418,10 +547,27 @@ let make_surface ~xwayland ~host_surface c =
   in
   let state = ref `Show in      (* X11 hidden windows get [`Hide] here *)
   Proxy.Handler.attach c @@ object
+    val mutable buffer_x = Int.min_int;
+    val mutable buffer_y = Int.min_int;
     inherit [_] C.Wl_surface.v1
     method! user_data = client_data (Surface data)
 
-    method on_attach _ ~buffer ~x ~y =
+    method on_attach p ~buffer ~untrusted_x ~untrusted_y =
+      (* sanitize start *)
+      if Proxy.version p >= 5l then (
+        if untrusted_x <> 0l then
+          C.Wl_surface.Errors.invalid_size p ~message:"Nonzero x passed to wl_surface.attach"
+        else if untrusted_y <> 0l then
+          C.Wl_surface.Errors.invalid_size p ~message:"Nonzero y passed to wl_surface.attach"
+        else
+          ()
+      ) else (
+        (V.check_x_y p (fun _ -> assert false) ~untrusted_x ~untrusted_y);
+      );
+      let (x, y) = (untrusted_x, untrusted_y) in
+      (* sanitize end *)
+      buffer_x <- Int32.to_int x;
+      buffer_y <- Int32.to_int y;
       let (x, y) = scale_to_host ~xwayland (x, y) in
       when_configured @@ fun () ->
       match buffer with
@@ -448,13 +594,25 @@ let make_surface ~xwayland ~host_surface c =
       Cstruct.blit data.client_memory 0 data.host_memory 0 (Cstruct.length data.client_memory);
       H.Wl_surface.commit h
 
-    method on_damage _ ~x ~y ~width ~height =
+    method on_damage p ~untrusted_x ~untrusted_y ~untrusted_width ~untrusted_height =
+      (* sanitize start *)
+      V.check_x_y p C.Wl_surface.Errors.invalid_offset ~untrusted_x ~untrusted_y;
+      V.check_width_height_int32 p C.Wl_surface.Errors.invalid_offset ~untrusted_width ~untrusted_height;
+      let (x, y, width, height) = (untrusted_x, untrusted_y, untrusted_width, untrusted_height) in
+      (* sanitize end *)
+      (* FIXME: bounds check properly by knowing the actual dimensions *)
       when_configured @@ fun () ->
       let (x, y) = scale_to_host ~xwayland (x, y) in
       let (width, height) = scale_to_host ~xwayland (width, height) in
       H.Wl_surface.damage h ~x ~y ~width ~height
 
-    method on_damage_buffer _ ~x ~y ~width ~height =
+    method on_damage_buffer p ~untrusted_x ~untrusted_y ~untrusted_width ~untrusted_height =
+      (* sanitize start *)
+      V.check_x_y p C.Wl_surface.Errors.invalid_offset ~untrusted_x ~untrusted_y;
+      V.check_width_height_int32 p C.Wl_surface.Errors.invalid_offset ~untrusted_width ~untrusted_height;
+      let (x, y, width, height) = (untrusted_x, untrusted_y, untrusted_width, untrusted_height) in
+      (* sanitize end *)
+      (* FIXME: bounds check properly by knowing the actual dimensions *)
       when_configured @@ fun () ->
       H.Wl_surface.damage_buffer h ~x ~y ~width ~height
 
@@ -479,15 +637,33 @@ let make_surface ~xwayland ~host_surface c =
       when_configured @@ fun () ->
       H.Wl_surface.set_opaque_region h ~region:(Option.map to_host region)
 
-    method on_set_buffer_scale _ ~scale =
+    method on_set_buffer_scale c ~untrusted_scale =
+      let scale =
+        if untrusted_scale < 1l then
+          C.Wl_surface.Errors.invalid_scale c ~message:"Scale cannot be negative"
+        else if untrusted_scale > 1024l then
+          (* Assume nobody needs a scale this large.  TODO: is this actually permitted? *)
+          Msg.bad_implementation "Scale greater than 1024 isn't allowed"
+        else
+          untrusted_scale
+      in
+      (* FIXME: defer request until surface commit *)
       when_configured @@ fun () ->
       H.Wl_surface.set_buffer_scale h ~scale
 
-    method on_set_buffer_transform _ ~transform =
+    method on_set_buffer_transform _ ~untrusted_transform =
+      (* UNSAFE *)
+      let transform = unsafe_no_sanitize untrusted_transform in
+      (* NO-sanitize end *)
       when_configured @@ fun () ->
       H.Wl_surface.set_buffer_transform h ~transform
 
-    method on_offset _ ~x ~y =
+    method on_offset p ~untrusted_x ~untrusted_y =
+      (* sanitize start *)
+      V.check_x_y p C.Wl_surface.Errors.invalid_offset ~untrusted_x ~untrusted_y;
+      let (x, y) = (untrusted_x, untrusted_y) in
+      (* sanitize end *)
+      (* FIXME: bounds check properly by knowing the actual dimensions *)
       when_configured @@ fun () ->
       let (x, y) = scale_to_host ~xwayland (x, y) in
       H.Wl_surface.offset h ~x ~y
@@ -538,7 +714,11 @@ let make_subsurface ~xwayland ~host_subsurface c =
     method on_place_below _ ~sibling = H.Wl_subsurface.place_below h ~sibling:(to_host sibling)
     method on_set_desync _ = H.Wl_subsurface.set_desync h
 
-    method on_set_position _ ~x ~y =
+    method on_set_position p ~untrusted_x ~untrusted_y =
+      (* sanitize start *)
+      V.check_x_y p (fun _ -> assert false) ~untrusted_x ~untrusted_y;
+      let (x, y) = (untrusted_x, untrusted_y) in
+      (* sanitize end *)
       let (x, y) = scale_to_host ~xwayland (x, y) in
       H.Wl_subsurface.set_position h ~x ~y
 
@@ -558,7 +738,7 @@ let make_subcompositor ~xwayland bind proxy =
       make_subsurface ~xwayland ~host_subsurface subsurface
   end
 
-let make_buffer b proxy =
+let make_shm_buffer b proxy =
   let user_data = client_data (Buffer (Shm.user_data b)) in
   Proxy.Handler.attach proxy @@ object
     inherit [_] C.Wl_buffer.v1
@@ -573,20 +753,26 @@ let make_shm_pool_virtwl ~virtio_gpu ~host_shm proxy ~fd:client_fd ~size:orig_si
   Proxy.Handler.attach proxy @@ object
     inherit [_] C.Wl_shm_pool.v1
 
-    method on_create_buffer _ buffer ~offset ~width ~height ~stride ~format =
-      let b = Shm.create_buffer mapping ~offset ~width ~height ~stride ~format buffer in
-      make_buffer b buffer
+    method on_create_buffer proxy buffer ~untrusted_offset ~untrusted_width ~untrusted_height ~untrusted_stride ~untrusted_format =
+      let b = Shm.create_buffer mapping ~untrusted_offset ~untrusted_width ~untrusted_height ~untrusted_stride ~untrusted_format proxy buffer in
+      make_shm_buffer b buffer
 
     method on_destroy t = Proxy.delete t
 
-    method on_resize _ ~size = Shm.resize mapping size
+    (* UNSAFE *)
+    method on_resize _ ~untrusted_size = Shm.resize mapping untrusted_size
   end
 
-let make_shm_pool_direct host_pool proxy =
+let make_shm_pool_direct size host_pool proxy =
   Proxy.Handler.attach proxy @@ object
+    val mutable buffer_size = size
     inherit [_] C.Wl_shm_pool.v1
 
-    method on_create_buffer _ buffer ~offset ~width ~height ~stride ~format =
+    method on_create_buffer shm buffer ~untrusted_offset ~untrusted_width ~untrusted_height ~untrusted_stride ~untrusted_format =
+      validate_shm_parameters ~buffer_size ~untrusted_offset ~untrusted_width ~untrusted_height
+        ~untrusted_stride ~untrusted_format shm;
+      let (offset, width, height, stride, format) =
+        (untrusted_offset, untrusted_width, untrusted_height, untrusted_stride, untrusted_format) in
       let host_buffer = H.Wl_shm_pool.create_buffer host_pool ~offset ~width ~height ~stride ~format @@ object
           inherit [_] H.Wl_buffer.v1
           method on_release _ = C.Wl_buffer.release buffer
@@ -600,7 +786,12 @@ let make_shm_pool_direct host_pool proxy =
 
     method on_destroy _ = H.Wl_shm_pool.destroy host_pool
 
-    method on_resize _ = H.Wl_shm_pool.resize host_pool
+    method on_resize c ~untrusted_size =
+      (if untrusted_size < buffer_size then
+        shm_pool_invalid_stride_str c ~message:"Attempt to shrink buffer");
+      let size = unsafe_no_sanitize untrusted_size in
+      H.Wl_shm_pool.resize host_pool ~size;
+      buffer_size <- size
   end
 
 let make_output ~xwayland bind c =
@@ -611,7 +802,8 @@ let make_output ~xwayland bind c =
       inherit [_] H.Wl_output.v1
       method! user_data = user_data
       method on_done _ = C.Wl_output.done_ (Proxy.cast_version c)
-      method on_geometry _ = C.Wl_output.geometry c
+      method on_geometry _ ~x ~y ~physical_width ~physical_height ~subpixel ~make ~model ~transform =
+        C.Wl_output.geometry c ~x ~y ~physical_width ~physical_height ~subpixel ~make ~model ~transform
       method on_mode _ = C.Wl_output.mode c
       method on_name _ ~name = C.Wl_output.name c ~name
       method on_description _ ~description = C.Wl_output.description c ~description
@@ -675,7 +867,9 @@ let make_pointer t ~xwayland ~host_seat c =
     inherit [_] C.Wl_pointer.v1
     method! user_data = user_data
 
-    method on_set_cursor _ ~serial ~surface ~hotspot_x ~hotspot_y =
+    method on_set_cursor _ ~untrusted_serial ~surface ~untrusted_hotspot_x ~untrusted_hotspot_y =
+      (* FIXME: sanitize! *)
+      let (serial, hotspot_x, hotspot_y) = (untrusted_serial, untrusted_hotspot_x, untrusted_hotspot_y) in
       (* Cursors are not unscaled, so no need to transform here. *)
       H.Wl_pointer.set_cursor h ~serial ~surface:(Option.map to_host surface) ~hotspot_x ~hotspot_y
 
@@ -750,21 +944,231 @@ let make_shm ~virtio_gpu bind c =
   let c = Proxy.cast_version c in
   let h = bind @@ object
       inherit [_] H.Wl_shm.v1
-      method on_format _ = C.Wl_shm.format c
+      method on_format p ~format =
+        (* Check that the format is one that can be supported. *)
+        if format = 0l || format = 1l then (
+          (* Do nothing.  This message is redundant. *)
+        ) else if Relay_stubs.validate_shm_format ~untrusted_format:format then (
+          (* Format can be used and won't trigger spurious protocol errors. *)
+          match ((C.Wl_shm.Format.of_int32 ~_proxy:p ~value:format): Wayland_proto.Wl_shm.Format.t) with
+          | _ -> C.Wl_shm.format c ~format
+          | exception Msg.Error _ -> (
+          (* Format will be rejected during message unmarshalling. *)
+          )
+        ) else (
+          (* Format cannot be used and attempts to use it will trigger a protocol error.
+           * Do not inform the client of this format. *)
+        )
     end
   in
   Proxy.Handler.attach c @@ object
     inherit [_] C.Wl_shm.v1
-    method on_create_pool _ proxy ~fd ~size =
+    method on_create_pool _ proxy ~untrusted_fd ~untrusted_size =
+      (* FIXME: sanitize! *)
+      let (fd, size) = (untrusted_fd, untrusted_size) in
+      (* FIXME end *)
       match virtio_gpu with
       | Some virtio_gpu -> make_shm_pool_virtwl ~virtio_gpu ~host_shm:h proxy ~fd ~size
       | None ->
         let host_pool = H.Wl_shm.create_pool h ~fd ~size @@ new H.Wl_shm_pool.v1 in
         Unix.close fd;
-        make_shm_pool_direct host_pool proxy
+        make_shm_pool_direct size host_pool proxy
 
     method on_release = delete_with H.Wl_shm.release h
   end
+
+module Linux_dmabuf = struct
+  let make_linux_buffer_params ~host_linux_buffer_params c =
+    let proxy = cv c in
+    let make_dma_buffer ~client_buffer h =
+      let c = client_buffer @@ object
+        inherit [_] C.Wl_buffer.v1
+        method on_destroy c = delete_with H.Wl_buffer.destroy h c
+      end in
+      Proxy.Handler.attach h @@ object
+        inherit [_] H.Wl_buffer.v1
+        method on_release _ = C.Wl_buffer.release c
+      end
+    in
+    let h = host_linux_buffer_params @@ object
+      inherit [_] H.Zwp_linux_buffer_params_v1.v1
+      method on_failed _ = C.Zwp_linux_buffer_params_v1.failed proxy
+      method on_created _ buffer = make_dma_buffer ~client_buffer:(C.Zwp_linux_buffer_params_v1.created proxy) buffer
+    end
+    in
+    let check_used t created =
+      if created then
+        C.Zwp_linux_buffer_params_v1.Errors.already_used ~message:"Already created" t
+    in
+    let check_complete t complete =
+      if not complete then C.Zwp_linux_buffer_params_v1.Errors.incomplete ~message:"No planes" t
+    in
+    Proxy.Handler.attach proxy @@ object (self)
+      val mutable created = false
+      val mutable have_modifiers = false
+      val mutable modifier_lo = 0l
+      val mutable modifier_hi = 0l
+      val buffer_data = [|None; None; None; None|];
+      inherit ['a] C.Zwp_linux_buffer_params_v1.v1
+      (* FIXME: close the file descriptors *)
+      method on_destroy = delete_with H.Zwp_linux_buffer_params_v1.destroy h
+      method on_create_immed t buffer ~untrusted_width ~untrusted_height ~untrusted_format ~untrusted_flags =
+        self#add t ~untrusted_format ~untrusted_width ~untrusted_height;
+        (* TODO: check format, flags, etc *)
+        let (width, height, format, flags) =
+          (untrusted_width, untrusted_height, untrusted_format, untrusted_flags) in
+        let host_buffer = H.Zwp_linux_buffer_params_v1.create_immed h ~width ~height ~format ~flags @@ object
+          inherit [_] H.Wl_buffer.v1
+          method on_release _ = C.Wl_buffer.release buffer
+        end in
+        Proxy.Handler.attach buffer @@ object
+          inherit [_] C.Wl_buffer.v1
+          method! user_data = client_data (Buffer (`Direct host_buffer))
+          method on_destroy = delete_with H.Wl_buffer.destroy host_buffer
+        end
+      method private add t ~untrusted_format ~untrusted_width ~untrusted_height =
+        check_used t created;
+        check_complete t have_modifiers;
+        V.check_width_height_int32 t C.Zwp_linux_buffer_params_v1.Errors.invalid_dimensions
+          ~untrusted_width ~untrusted_height;
+        if not (Relay_stubs.validate_format ~untrusted_format ~untrusted_width ~untrusted_height) then (
+          C.Zwp_linux_buffer_params_v1.Errors.invalid_dimensions t
+            ~message:"Invalid format or invalid dimensions for format"
+        );
+        if Option.is_none buffer_data.(0) then (
+          C.Zwp_linux_buffer_params_v1.Errors.incomplete t ~message:"Plane 0 not used"
+        );
+        let max =
+          if Option.is_none buffer_data.(2) then (
+            if Option.is_some buffer_data.(3) then
+              C.Zwp_linux_buffer_params_v1.Errors.incomplete t ~message:"Plane 3 is set but plane 2 is not"
+            else if Option.is_some buffer_data.(1) then 1 else 0
+          ) else (
+            if Option.is_none buffer_data.(1) then
+              C.Zwp_linux_buffer_params_v1.Errors.incomplete t ~message:"Plane 2 is set but plane 1 is not"
+            else if Option.is_some buffer_data.(3) then 3 else 2
+          ) in
+        for plane_idx = 0 to max do
+          match buffer_data.(plane_idx) with
+          | None -> assert false
+          | Some (fd, offset, stride) -> (
+            (* Avoid double FD close *)
+            buffer_data.(plane_idx) <- None;
+            (* FIXME: does this take ownership of the FD? *)
+            H.Zwp_linux_buffer_params_v1.add h ~plane_idx:(Int32.of_int plane_idx) ~fd ~offset ~stride ~modifier_hi ~modifier_lo
+          )
+        done
+      method on_create t ~untrusted_width ~untrusted_height ~untrusted_format ~untrusted_flags =
+        (* TODO: check format, flags, etc *)
+        self#add t ~untrusted_format ~untrusted_width ~untrusted_height;
+        let (width, height, format, flags) =
+          (untrusted_width, untrusted_height, untrusted_format, untrusted_flags) in
+        created <- true;
+        H.Zwp_linux_buffer_params_v1.create h ~width ~height ~format ~flags
+      method on_add t ~untrusted_fd
+               ~(untrusted_plane_idx:int32)
+               ~(untrusted_offset:int32)
+               ~(untrusted_stride:int32)
+               ~(untrusted_modifier_hi:int32)
+               ~(untrusted_modifier_lo:int32) =
+        (* FIXME: close the file descriptor on errors! *)
+        check_used t created;
+        if have_modifiers then begin
+          let (lsl) = Int64.shift_left in
+          let (lor) = Int64.logor in
+          let of_int32 = Int64.of_int32 in
+          let old_modifier = (of_int32 modifier_hi lsl 32) lor (of_int32 modifier_lo) in
+          let new_modifier = (of_int32 untrusted_modifier_hi lsl 32) lor (of_int32 untrusted_modifier_lo) in
+          if old_modifier <> new_modifier then
+            let message = Format.asprintf "Modifier mismatch: previous modifier is 0x%016Lx, but current modifier is 0x%016LX" old_modifier new_modifier in
+            C.Zwp_linux_buffer_params_v1.Errors.invalid_format t ~message
+        end else begin
+          modifier_lo <- untrusted_modifier_lo;
+          modifier_hi <- untrusted_modifier_hi;
+          have_modifiers <- true
+        end;
+        if untrusted_plane_idx < 0l then (
+          let message = Format.asprintf "Negative plane index %ld" untrusted_plane_idx in
+          C.Zwp_linux_buffer_params_v1.Errors.plane_idx ~message t
+        );
+        if untrusted_offset < 0l then (
+          let message = Format.asprintf "Negative offset %ld" untrusted_plane_idx in
+          C.Zwp_linux_buffer_params_v1.Errors.out_of_bounds ~message t
+        );
+        if untrusted_plane_idx >= 4l then (
+          let message = Format.asprintf "Excessive plane index %ld" untrusted_plane_idx in
+          C.Zwp_linux_buffer_params_v1.Errors.plane_idx ~message t
+        );
+        if untrusted_stride <= 0l then (
+          let message = Format.asprintf "Negative or zero stride %ld" untrusted_stride in
+          C.Zwp_linux_buffer_params_v1.Errors.invalid_dimensions ~message t
+        );
+        let size = Relay_stubs.check_fd_offset untrusted_fd in
+        if Int64.of_int32 untrusted_offset >= size then (
+          if size < 0L then (
+            C.Zwp_linux_buffer_params_v1.Errors.invalid_wl_buffer t
+              ~message:"lseek() failed or file size exceeds INT64_MAX"
+          ) else (
+            let message = Format.asprintf "Buffer size is %Ld, but offset is %ld" size untrusted_offset in
+            C.Zwp_linux_buffer_params_v1.Errors.out_of_bounds t ~message
+          )
+        );
+        let plane_idx = Int32.to_int untrusted_plane_idx in
+        match buffer_data.(plane_idx) with
+        | None -> buffer_data.(plane_idx) <- Some (untrusted_fd, untrusted_offset, untrusted_stride)
+        | Some _ ->
+          let message = Format.asprintf "Plane index %d already used" plane_idx in
+          C.Zwp_linux_buffer_params_v1.Errors.already_used ~message t
+    end
+
+  let make_linux_dmabuf_feedback ?override_dev ~host_dmabuf_feedback c =
+    let proxy = cv c in
+    let h = host_dmabuf_feedback @@ object
+      inherit [_] H.Zwp_linux_dmabuf_feedback_v1.v1
+      method on_done _ = C.Zwp_linux_dmabuf_feedback_v1.done_ c
+      method on_format_table _ = C.Zwp_linux_dmabuf_feedback_v1.format_table c
+      method on_main_device _ ~(device:string) =
+        C.Zwp_linux_dmabuf_feedback_v1.main_device c ~device:(
+          match override_dev with Some dev -> dev | None -> device)
+      method on_tranche_done _ = C.Zwp_linux_dmabuf_feedback_v1.tranche_done c
+      method on_tranche_target_device _ ~device =
+        C.Zwp_linux_dmabuf_feedback_v1.tranche_target_device c ~device:(
+          match override_dev with Some dev -> dev | None -> device)
+      method on_tranche_formats _ = C.Zwp_linux_dmabuf_feedback_v1.tranche_formats c
+      method on_tranche_flags _ = C.Zwp_linux_dmabuf_feedback_v1.tranche_flags c
+    end
+    in Proxy.Handler.attach proxy @@ object
+      inherit [_] C.Zwp_linux_dmabuf_feedback_v1.v1
+      method on_destroy = delete_with H.Zwp_linux_dmabuf_feedback_v1.destroy h
+    end
+
+  let make_linux_dmabuf ~(virtio_gpu:Virtio_gpu.t option) bind c =
+    let h = bind @@ object
+        inherit [_] H.Zwp_linux_dmabuf_v1.v1
+        method on_format _ ~format = C.Zwp_linux_dmabuf_v1.format c ~format
+        method on_modifier _ ~format ~modifier_hi ~modifier_lo =
+          C.Zwp_linux_dmabuf_v1.modifier c ~format ~modifier_hi ~modifier_lo
+      end
+    in
+    Proxy.Handler.attach c @@ object
+      val override_dev = Option.map Virtio_gpu.device_string virtio_gpu
+      val h = h
+      inherit [_] C.Zwp_linux_dmabuf_v1.v1
+      method on_destroy = delete_with H.Zwp_linux_dmabuf_v1.destroy h
+      method on_create_params _ params_id =
+        let host_linux_buffer_params = H.Zwp_linux_dmabuf_v1.create_params h in
+        make_linux_buffer_params ~host_linux_buffer_params params_id
+      method on_get_surface_feedback _ id ~surface =
+        let host_dmabuf_feedback = H.Zwp_linux_dmabuf_v1.get_surface_feedback h ~surface:(to_host surface) in
+        make_linux_dmabuf_feedback ?override_dev ~host_dmabuf_feedback id
+      method on_get_default_feedback _ id =
+        let host_dmabuf_feedback = H.Zwp_linux_dmabuf_v1.get_default_feedback h in
+        make_linux_dmabuf_feedback ?override_dev ~host_dmabuf_feedback id
+    end
+end
+
+let validate_serial ~(untrusted_serial: int32) = untrusted_serial
+(** TODO: do actual validation here! *)
 
 let make_popup ~host_popup c =
   let h = host_popup @@ object
@@ -777,8 +1181,12 @@ let make_popup ~host_popup c =
   Proxy.Handler.attach c @@ object
     inherit [_] C.Xdg_popup.v1
     method on_destroy = delete_with H.Xdg_popup.destroy h
-    method on_grab _ ~seat = H.Xdg_popup.grab h ~seat:(to_host seat)
-    method on_reposition _ ~positioner = H.Xdg_popup.reposition h ~positioner:(to_host positioner)
+    method on_grab _ ~seat ~(untrusted_serial:int32): unit =
+      let serial = validate_serial ~untrusted_serial in
+      H.Xdg_popup.grab h ~seat:(to_host seat) ~serial
+    method on_reposition _ ~positioner ~(untrusted_token:int32): unit =
+      (* FIXME: validate token *)
+      H.Xdg_popup.reposition h ~positioner:(to_host positioner) ~token:untrusted_token
   end
 
 let make_toplevel ~tag ~host_toplevel c =
@@ -792,20 +1200,67 @@ let make_toplevel ~tag ~host_toplevel c =
   in
   let user_data = client_data (Toplevel h) in
   Proxy.Handler.attach c @@ object
+    val h = h
+    val mutable min_width = 0
+    val mutable min_height = 0
+    val mutable max_width = 0
+    val mutable max_height = 0
     inherit [_] C.Xdg_toplevel.v1
     method! user_data = user_data
     method on_destroy = delete_with H.Xdg_toplevel.destroy h
-    method on_move _ ~seat = H.Xdg_toplevel.move h ~seat:(to_host seat)
-    method on_resize _ ~seat = H.Xdg_toplevel.resize h ~seat:(to_host seat)
-    method on_set_app_id _ = H.Xdg_toplevel.set_app_id h
-    method on_set_fullscreen _ ~output = H.Xdg_toplevel.set_fullscreen h ~output:(Option.map to_host output)
-    method on_set_max_size _ = H.Xdg_toplevel.set_max_size h
+    method on_move _ ~seat ~(untrusted_serial:int32): unit =
+      let serial = validate_serial ~untrusted_serial in
+      H.Xdg_toplevel.move h ~seat:(to_host seat) ~serial
+    method on_resize _ ~seat ~(untrusted_serial:int32) ~(untrusted_edges): unit =
+      let serial = validate_serial ~untrusted_serial in
+      (* FIXME: validate edges *)
+      let edges = unsafe_no_sanitize untrusted_edges in
+      H.Xdg_toplevel.resize h ~seat:(to_host seat) ~serial ~edges
+    method on_set_app_id _ ~(untrusted_app_id:string): unit =
+      (* TODO: validate app ID *)
+      H.Xdg_toplevel.set_app_id h ~app_id:untrusted_app_id
+    method on_set_fullscreen _ ~output =
+      if false then
+        H.Xdg_toplevel.set_fullscreen h ~output:(Option.map to_host output)
+      else
+        H.Xdg_toplevel.set_maximized h
+    method on_set_max_size p ~(untrusted_width:int32) ~(untrusted_height:int32): unit =
+      V.check_max_width_height p C.Xdg_toplevel.Errors.invalid_size ~untrusted_width ~untrusted_height;
+      let untrusted_width_int = Int32.to_int untrusted_width in
+      let untrusted_height_int = Int32.to_int untrusted_height in
+      (if min_width <> 0 && untrusted_width_int <> 0 && min_width > untrusted_width_int then
+        C.Xdg_toplevel.Errors.invalid_size p ~message:(
+            Format.asprintf "Max width %d less than min width %d" untrusted_width_int min_width));
+      (if min_height <> 0 && untrusted_height_int <> 0 && min_height > untrusted_height_int then
+        C.Xdg_toplevel.Errors.invalid_size p ~message:(
+            Format.asprintf "Max height %d less than min height %d" untrusted_height_int min_height));
+      max_width <- untrusted_width_int;
+      max_height <- untrusted_height_int;
+      H.Xdg_toplevel.set_min_size h ~width:untrusted_width ~height:untrusted_height;
     method on_set_maximized _ = H.Xdg_toplevel.set_maximized h
-    method on_set_min_size _ = H.Xdg_toplevel.set_min_size h
+    method on_set_min_size p ~(untrusted_width:int32) ~(untrusted_height:int32): unit =
+      V.check_max_width_height p C.Xdg_toplevel.Errors.invalid_size ~untrusted_width ~untrusted_height;
+      let untrusted_width_int = Int32.to_int untrusted_width in
+      let untrusted_height_int = Int32.to_int untrusted_height in
+      (if max_width <> 0 && untrusted_width_int <> 0 && max_width < untrusted_width_int then
+        C.Xdg_toplevel.Errors.invalid_size p ~message:(
+            Format.asprintf "Max width %d less than min width %d" max_width untrusted_width_int));
+      (if max_height <> 0 && untrusted_height_int <> 0 && max_height < untrusted_height_int then
+        C.Xdg_toplevel.Errors.invalid_size p ~message:(
+            Format.asprintf "Max height %d less than min height %d" max_height untrusted_height_int));
+      min_width <- untrusted_width_int;
+      min_height <- untrusted_height_int;
+      H.Xdg_toplevel.set_min_size h ~width:untrusted_width ~height:untrusted_height
     method on_set_minimized _ = H.Xdg_toplevel.set_minimized h
     method on_set_parent _ ~parent = H.Xdg_toplevel.set_parent h ~parent:(Option.map to_host parent)
-    method on_set_title _ ~title = H.Xdg_toplevel.set_title h ~title:(tag ^ title)
-    method on_show_window_menu _ ~seat = H.Xdg_toplevel.show_window_menu h ~seat:(to_host seat)
+    method on_set_title _ ~(untrusted_title:string) : unit =
+      (* TODO: sanitize title using a C library. *)
+      H.Xdg_toplevel.set_title h ~title:(tag ^ untrusted_title)
+    method on_show_window_menu p ~seat ~(untrusted_serial:int32)
+             ~(untrusted_x:int32) ~(untrusted_y:int32): unit =
+      V.check_x_y p C.Xdg_toplevel.Errors.invalid_size ~untrusted_x ~untrusted_y;
+      let serial = validate_serial ~untrusted_serial in
+      H.Xdg_toplevel.show_window_menu h ~seat:(to_host seat) ~serial ~x:untrusted_x ~y:untrusted_y
     method on_unset_fullscreen _ = H.Xdg_toplevel.unset_fullscreen h
     method on_unset_maximized _ = H.Xdg_toplevel.unset_maximized h
   end
@@ -822,8 +1277,18 @@ let make_xdg_surface ~tag ~host_xdg_surface c =
     inherit [_] C.Xdg_surface.v1
     method! user_data = user_data
     method on_destroy = delete_with H.Xdg_surface.destroy h
-    method on_ack_configure _ = H.Xdg_surface.ack_configure h
-    method on_set_window_geometry _ = H.Xdg_surface.set_window_geometry h
+    method on_ack_configure _ ~(untrusted_serial:int32): unit =
+      H.Xdg_surface.ack_configure h ~serial:(validate_serial ~untrusted_serial)
+    method on_set_window_geometry p
+             ~(untrusted_x:int32)
+             ~(untrusted_y:int32)
+             ~(untrusted_width:int32)
+             ~(untrusted_height:int32): unit =
+      V.check_width_height_int32 p C.Xdg_surface.Errors.invalid_size ~untrusted_width ~untrusted_height;
+      V.check_x_y p C.Xdg_surface.Errors.invalid_size ~untrusted_x ~untrusted_y;
+
+      let (x, y, width, height) = (untrusted_x, untrusted_y, untrusted_width, untrusted_height) in
+      H.Xdg_surface.set_window_geometry h ~x ~y ~width ~height
 
     method on_get_toplevel _ = make_toplevel ~tag ~host_toplevel:(H.Xdg_surface.get_toplevel h)
 
@@ -840,15 +1305,48 @@ let make_positioner ~host_positioner c =
     inherit [_] C.Xdg_positioner.v1
     method! user_data = user_data
     method on_destroy = delete_with H.Xdg_positioner.destroy h
-    method on_set_anchor _ = H.Xdg_positioner.set_anchor h
-    method on_set_anchor_rect _ = H.Xdg_positioner.set_anchor_rect h
-    method on_set_constraint_adjustment _ = H.Xdg_positioner.set_constraint_adjustment h
-    method on_set_gravity _ = H.Xdg_positioner.set_gravity h
-    method on_set_offset _ = H.Xdg_positioner.set_offset h
-    method on_set_size _ = H.Xdg_positioner.set_size h
+    method on_set_anchor _ ~(untrusted_anchor:Protocols.Xdg_positioner.Anchor.t): unit =
+      (* TODO: validate anchor *)
+      let anchor = unsafe_no_sanitize untrusted_anchor in
+      H.Xdg_positioner.set_anchor h ~anchor
+    method on_set_anchor_rect p
+             ~(untrusted_x:int32)
+             ~(untrusted_y:int32)
+             ~(untrusted_width:int32)
+             ~(untrusted_height:int32): unit =
+      V.check_width_height_int32 p C.Xdg_positioner.Errors.invalid_input ~untrusted_width ~untrusted_height;
+      V.check_x_y p C.Xdg_positioner.Errors.invalid_input ~untrusted_x ~untrusted_y;
+      let (x, y, width, height) = (untrusted_x, untrusted_y, untrusted_width, untrusted_height) in
+      H.Xdg_positioner.set_anchor_rect h ~x ~y ~width ~height
+    method on_set_constraint_adjustment _ ~(untrusted_constraint_adjustment:int32): unit =
+      (* Validated by generated code.  FIXME: better error. *)
+      H.Xdg_positioner.set_constraint_adjustment h ~constraint_adjustment:untrusted_constraint_adjustment
+    method on_set_gravity _ ~(untrusted_gravity:Protocols.Xdg_positioner.Gravity.t): unit =
+      (* TODO: validate gravity *)
+      let gravity = unsafe_no_sanitize untrusted_gravity in
+      H.Xdg_positioner.set_gravity h ~gravity
+    method on_set_offset p ~(untrusted_x:int32) ~(untrusted_y:int32): unit =
+      (* UNSAFE *)
+      V.check_x_y p (fun _ -> assert false) ~untrusted_x ~untrusted_y;
+      H.Xdg_positioner.set_offset h ~x:untrusted_x ~y:untrusted_y
+    method on_set_size t ~(untrusted_width:int32) ~(untrusted_height:int32): unit =
+      (* sanitize start *)
+      V.check_width_height_int32 t (fun _ -> assert false) ~untrusted_width ~untrusted_height;
+      let (width, height) = (untrusted_width, untrusted_height) in
+      (* sanitize end.  FIXME: is this enough sanitization? *)
+      H.Xdg_positioner.set_size h ~width ~height
     method on_set_reactive _ = H.Xdg_positioner.set_reactive h
-    method on_set_parent_size _ = H.Xdg_positioner.set_parent_size h
-    method on_set_parent_configure _ = H.Xdg_positioner.set_parent_configure h
+    method on_set_parent_size t ~(untrusted_parent_width:int32) ~(untrusted_parent_height:int32) =
+      (* sanitize start *)
+      V.check_width_height_int32 t (fun _ -> assert false)
+        ~untrusted_width:untrusted_parent_width
+        ~untrusted_height:untrusted_parent_height;
+      let (parent_width, parent_height) = (untrusted_parent_width, untrusted_parent_width) in
+      (* sanitize end.  FIXME: is this enough sanitization? *)
+      H.Xdg_positioner.set_parent_size h ~parent_width ~parent_height
+    method on_set_parent_configure _ ~(untrusted_serial:int32): unit =
+      let serial = validate_serial ~untrusted_serial in
+      H.Xdg_positioner.set_parent_configure h ~serial
   end
 
 let make_xdg_wm_base ~xwayland ~tag bind proxy =
@@ -866,9 +1364,10 @@ let make_xdg_wm_base ~xwayland ~tag bind proxy =
 
     method on_destroy = delete_with H.Xdg_wm_base.destroy h
 
-    method on_pong _ ~serial =
+    method on_pong _ ~(untrusted_serial:int32): unit =
+      (* TODO: validate that the serial number is correct! *)
       match Queue.take_opt pong_handlers with
-      | Some h -> h ~serial
+      | Some h -> h ~serial:untrusted_serial
       | None -> Log.warn (fun f -> f "Ignoring unexpected pong from client!")
 
     method on_create_positioner _ = make_positioner ~host_positioner:(H.Xdg_wm_base.create_positioner h)
@@ -931,7 +1430,12 @@ let make_kde_decoration ~host_decoration c =
   Proxy.Handler.attach c @@ object
     inherit [_] C.Org_kde_kwin_server_decoration.v1
     method on_release = delete_with H.Org_kde_kwin_server_decoration.release h
-    method on_request_mode _ = H.Org_kde_kwin_server_decoration.request_mode h
+    method on_request_mode _ ~untrusted_mode =
+      begin match untrusted_mode with
+      | 0l | 1l | 2l -> ()
+      | _bad -> assert false (* TODO: proper protocol error *)
+      end;
+      H.Org_kde_kwin_server_decoration.request_mode h ~mode:untrusted_mode
   end
 
 let make_kde_decoration_manager bind c =
@@ -956,7 +1460,9 @@ let make_xdg_decoration ~host_decoration c =
   Proxy.Handler.attach c @@ object
     inherit [_] C.Zxdg_toplevel_decoration_v1.v1
     method on_destroy = delete_with H.Zxdg_toplevel_decoration_v1.destroy h
-    method on_set_mode _ = H.Zxdg_toplevel_decoration_v1.set_mode h
+    method on_set_mode _ ~(untrusted_mode:_): unit =
+      (* TODO: better error for bad mode *)
+      H.Zxdg_toplevel_decoration_v1.set_mode h ~mode:untrusted_mode
     method on_unset_mode _ = H.Zxdg_toplevel_decoration_v1.unset_mode h
   end
 
@@ -969,6 +1475,8 @@ let make_xdg_decoration_manager bind c =
     inherit [_] C.Zxdg_decoration_manager_v1.v1
     method on_destroy = delete_with H.Zxdg_decoration_manager_v1.destroy h
     method on_get_toplevel_decoration _ decoration ~toplevel =
+      (* TODO: check that no buffers have been attached or committed *)
+      (* TODO: check if buffers are attached or manipulated before configure event *)
       let toplevel = to_host toplevel in
       make_xdg_decoration ~host_decoration:(H.Zxdg_decoration_manager_v1.get_toplevel_decoration h ~toplevel) decoration
 end
@@ -996,20 +1504,54 @@ let make_relative_pointer_manager bind proxy =
       make_relative_pointer ~host_relative_pointer relative_pointer
   end
 
+let validate_mime_type _ ~(untrusted_mime_type:string): string =
+  (* FIXME: validate! *)
+  untrusted_mime_type
+
+
 let make_data_offer ~client_offer h =
   let c = client_offer @@ object
       inherit [_] C.Wl_data_offer.v1
-      method on_accept _ = H.Wl_data_offer.accept h
+      method on_accept c ~(untrusted_serial:int32) ~(untrusted_mime_type:string option): unit =
+        (* TODO: validate the serial number & the MIME type *)
+        let serial = validate_serial ~untrusted_serial in
+        let mime_type = match untrusted_mime_type with
+          | Some untrusted_mime_type -> Some (validate_mime_type c ~untrusted_mime_type)
+          | None -> None
+        in
+        H.Wl_data_offer.accept h ~serial ~mime_type
       method on_destroy c =
         delete_with H.Wl_data_offer.destroy h c;
         (* Effectively, the "selection" event is the destructor of the previous selection,
            and this is the confirmation. The server doesn't send a delete event, so just do it manually. *)
         Proxy.delete h
       method on_finish _ = H.Wl_data_offer.finish h
-      method on_receive _ ~mime_type ~fd =
-        H.Wl_data_offer.receive h ~mime_type ~fd;
-        Unix.close fd
-      method on_set_actions _ = H.Wl_data_offer.set_actions h
+      method on_receive _ ~(untrusted_mime_type:string) ~(untrusted_fd:Unix.file_descr): unit =
+        let fd = match Relay_stubs.validate_pipe untrusted_fd with
+        (* FIXME: better logging *)
+        | exception Unix.Unix_error _ -> Wayland.Msg.bad_implementation "problem validating pipe"
+        | Success -> untrusted_fd
+        | Non_AF_UNIX_Socket -> Wayland.Msg.bad_implementation "File descriptor is a socket, but not AF_UNIX socket"
+        | Non_stream_AF_UNIX_Socket -> Wayland.Msg.bad_implementation "File descriptor is an AF_UNIX socket, but not a stream socket"
+        | Neither_pipe_nor_socket -> Wayland.Msg.bad_implementation "File descriptor is neither a pipe nor a socket"
+        in
+        (* TODO: check that the MIME type is valid *)
+        Fun.protect
+          ~finally:(fun () -> Unix.close fd)
+          (fun () -> (H.Wl_data_offer.receive h ~mime_type:untrusted_mime_type ~fd))
+      method on_set_actions p ~(untrusted_dnd_actions:int32) ~(untrusted_preferred_action:int32) =
+        (* sanitize start*)
+        match untrusted_preferred_action with
+        | _ when untrusted_dnd_actions < 0l || untrusted_dnd_actions > 7l -> (
+          C.Wl_data_offer.Errors.invalid_action_mask p ~message:"Invalid action mask")
+        | 1l | 2l | 4l when Int32.logand untrusted_preferred_action untrusted_dnd_actions = 0l -> (
+          C.Wl_data_offer.Errors.invalid_action_mask p ~message:"Preferred action not in mask")
+        | 1l | 2l | 4l -> (
+          (* sanitized end *)
+          H.Wl_data_offer.set_actions h
+            ~dnd_actions:untrusted_dnd_actions
+            ~preferred_action:untrusted_preferred_action)
+        | _ -> C.Wl_data_offer.Errors.invalid_action_mask p ~message:"Invalid preferred action"
     end in
   let user_data = host_data (HD.Data_offer c) in
   Proxy.Handler.attach h @@ object
@@ -1039,8 +1581,14 @@ let make_data_source ~host_source c =
     inherit [_] C.Wl_data_source.v1
     method! user_data = user_data
     method on_destroy = delete_with H.Wl_data_source.destroy h
-    method on_offer _ = H.Wl_data_source.offer h
-    method on_set_actions _ = H.Wl_data_source.set_actions h
+    method on_offer p ~untrusted_mime_type =
+      H.Wl_data_source.offer h ~mime_type:(validate_mime_type p ~untrusted_mime_type)
+    method on_set_actions _ ~(untrusted_dnd_actions:int32): unit =
+      (* TODO: validate that this source will only be used for drag-and-drop. *)
+      (* TODO: validate that this request is made only once. *)
+      (if untrusted_dnd_actions < 0l || untrusted_dnd_actions > 7l then
+        (* FIXME: protocol error *) assert false);
+      H.Wl_data_source.set_actions h ~dnd_actions:untrusted_dnd_actions
   end
 
 let make_data_device ~xwayland ~host_device c =
@@ -1065,12 +1613,16 @@ let make_data_device ~xwayland ~host_device c =
   Proxy.Handler.attach c @@ object
     inherit [_] C.Wl_data_device.v1
     method on_release = delete_with H.Wl_data_device.release h
-    method on_set_selection _ ~source = H.Wl_data_device.set_selection h ~source:(Option.map to_host source)
-    method on_start_drag _ ~source ~origin ~icon =
+    method on_set_selection _ ~source ~(untrusted_serial:int32) =
+      (* TODO: validate serial *)
+      H.Wl_data_device.set_selection h ~source:(Option.map to_host source) ~serial:untrusted_serial
+    method on_start_drag _ ~source ~origin ~icon ~(untrusted_serial:int32): unit =
+      (* TODO: validate serial *)
       H.Wl_data_device.start_drag h
         ~source:(Option.map to_host source)
         ~origin:(to_host origin)
         ~icon:(Option.map to_host icon)
+        ~serial:untrusted_serial
   end
 
 let make_data_device_manager ~xwayland bind proxy =
@@ -1085,6 +1637,10 @@ let make_data_device_manager ~xwayland bind proxy =
       make_data_device ~xwayland c ~host_device:(H.Wl_data_device_manager.get_data_device h ~seat)
   end
 
+let validate_pipe c ~(untrusted_fd:Unix.file_descr): Unix.file_descr =
+  (* TODO: validate *)
+  let _ = c in untrusted_fd
+
 module Gtk_primary = struct
   let make_gtk_data_offer ~client_offer h =
     let c = client_offer @@ object
@@ -1096,9 +1652,12 @@ module Gtk_primary = struct
              and this is the confirmation. The server doesn't send a delete event, so just do it manually. *)
           Proxy.delete h
 
-        method on_receive _ ~mime_type ~fd =
-          H.Zwp_primary_selection_offer_v1.receive h ~mime_type ~fd;
-          Unix.close fd
+        method on_receive c ~(untrusted_mime_type:string) ~(untrusted_fd:Unix.file_descr) =
+          Fun.protect ~finally:(fun () -> Unix.close untrusted_fd)
+            (fun () ->
+              let mime_type = validate_mime_type c ~untrusted_mime_type in
+              let fd = validate_pipe c ~untrusted_fd in
+              H.Zwp_primary_selection_offer_v1.receive h ~mime_type ~fd)
       end in
     let user_data = host_data (HD.Gtk_data_offer c) in
     Proxy.Handler.attach h @@ object
@@ -1121,7 +1680,9 @@ module Gtk_primary = struct
       inherit [_] C.Gtk_primary_selection_source.v1
       method! user_data = user_data
       method on_destroy = delete_with H.Zwp_primary_selection_source_v1.destroy h
-      method on_offer _ = H.Zwp_primary_selection_source_v1.offer h
+      method on_offer c ~(untrusted_mime_type: string): unit =
+        let mime_type = validate_mime_type c ~untrusted_mime_type in
+        H.Zwp_primary_selection_source_v1.offer h ~mime_type
     end
 
   let make_gtk_primary_selection_device ~host_device c =
@@ -1140,13 +1701,15 @@ module Gtk_primary = struct
     Proxy.Handler.attach c @@ object
       inherit [_] C.Gtk_primary_selection_device.v1
       method on_destroy = delete_with H.Zwp_primary_selection_device_v1.destroy h
-      method on_set_selection _ ~source =
+      method on_set_selection _ ~source ~(untrusted_serial:int32): unit =
         let to_host x =
           let Client_data (CD.Gtk_source data) = user_data x in
           cv data
         in
         let source = Option.map to_host source in
-        H.Zwp_primary_selection_device_v1.set_selection h ~source
+        (* TODO: validate serial *)
+        let serial = untrusted_serial in
+        H.Zwp_primary_selection_device_v1.set_selection h ~source ~serial
     end
 
   let make_device_manager bind proxy =
@@ -1175,7 +1738,9 @@ let make_locked_pointer ~host_pointer c =
     inherit [_] C.Zwp_locked_pointer_v1.v1
     method on_destroy = delete_with H.Zwp_locked_pointer_v1.destroy h
     method on_set_region _ ~region = H.Zwp_locked_pointer_v1.set_region h ~region:(Option.map to_host region)
-    method on_set_cursor_position_hint _ ~surface_x ~surface_y =
+    method on_set_cursor_position_hint _ ~(untrusted_surface_x:Fixed.t) ~(untrusted_surface_y:Fixed.t): unit =
+      (* TODO: validate stuff *)
+      let (surface_x, surface_y) = (untrusted_surface_x, untrusted_surface_y) in
       H.Zwp_locked_pointer_v1.set_cursor_position_hint h ~surface_x:surface_x ~surface_y:surface_y
   end
 
@@ -1198,14 +1763,18 @@ let make_pointer_constraints bind proxy =
     inherit [_] C.Zwp_pointer_constraints_v1.v1
     method on_destroy = delete_with H.Zwp_pointer_constraints_v1.destroy h
 
-    method on_lock_pointer _ locked_pointer ~surface ~pointer ~region ~lifetime =
+    method on_lock_pointer _ locked_pointer ~surface ~pointer ~region ~untrusted_lifetime =
+      (* validated by generated code *)
+      let lifetime = untrusted_lifetime in
       let surface = to_host surface in
       let pointer = to_host pointer in
       let region = Option.map to_host region in
       let host_pointer = H.Zwp_pointer_constraints_v1.lock_pointer h ~surface ~pointer ~region ~lifetime in
       make_locked_pointer ~host_pointer locked_pointer
 
-    method on_confine_pointer _ locked_pointer ~surface ~pointer ~region ~lifetime =
+    method on_confine_pointer _ locked_pointer ~surface ~pointer ~region ~untrusted_lifetime =
+      (* validated by generated code *)
+      let lifetime = untrusted_lifetime in
       let surface = to_host surface in
       let pointer = to_host pointer in
       let region = Option.map to_host region in
@@ -1225,9 +1794,13 @@ module Zwp_primary = struct
              and this is the confirmation. The server doesn't send a delete event, so just do it manually. *)
           Proxy.delete h
 
-        method on_receive _ ~mime_type ~fd =
-          H.Zwp_primary_selection_offer_v1.receive h ~mime_type ~fd;
-          Unix.close fd
+        method on_receive c ~(untrusted_mime_type:string) ~(untrusted_fd): unit =
+          Fun.protect
+            ~finally:(fun () -> Unix.close untrusted_fd)
+            (fun () ->
+              let mime_type = validate_mime_type c ~untrusted_mime_type in
+              let fd = validate_pipe c ~untrusted_fd in
+              H.Zwp_primary_selection_offer_v1.receive h ~mime_type ~fd)
       end in
     let user_data = host_data (HD.Zwp_data_offer c) in
     Proxy.Handler.attach h @@ object
@@ -1250,7 +1823,9 @@ module Zwp_primary = struct
       inherit [_] C.Zwp_primary_selection_source_v1.v1
       method! user_data = user_data
       method on_destroy = delete_with H.Zwp_primary_selection_source_v1.destroy h
-      method on_offer _ = H.Zwp_primary_selection_source_v1.offer h
+      method on_offer p ~(untrusted_mime_type:string): unit =
+        let mime_type = validate_mime_type p ~untrusted_mime_type in
+        H.Zwp_primary_selection_source_v1.offer h ~mime_type
     end
 
   let make_primary_selection_device ~host_device c =
@@ -1262,9 +1837,10 @@ module Zwp_primary = struct
     Proxy.Handler.attach c @@ object
       inherit [_] C.Zwp_primary_selection_device_v1.v1
       method on_destroy = delete_with H.Zwp_primary_selection_device_v1.destroy h
-      method on_set_selection _ ~source =
+      method on_set_selection _ ~source ~(untrusted_serial:int32): unit =
+        let serial = validate_serial ~untrusted_serial in
         let source = Option.map to_host source in
-        H.Zwp_primary_selection_device_v1.set_selection h ~source
+        H.Zwp_primary_selection_device_v1.set_selection h ~source ~serial
     end
 
   let make_device_manager bind proxy =
@@ -1301,6 +1877,7 @@ let registry =
     (module Zxdg_decoration_manager_v1);
     (module Zwp_relative_pointer_manager_v1);
     (module Zwp_pointer_constraints_v1);
+    (module Zwp_linux_dmabuf_v1);
   ]
 
 let make_registry ~xwayland t reg =
@@ -1325,10 +1902,11 @@ let make_registry ~xwayland t reg =
   Proxy.Handler.attach reg @@ object
     inherit [_] C.Wl_registry.v1
 
-    method on_bind : type a. _ -> name:int32 -> (a, [`Unknown], _) Proxy.t -> unit =
-      fun _ ~name proxy ->
-      let name = Int32.to_int name in
-      if name < 0 || name >= Array.length registry then Fmt.failwith "Bad registry entry name %d" name;
+    method on_bind : type a. _ -> untrusted_name:int32 -> (a, [`Unknown], _) Proxy.t -> unit =
+      fun _ ~untrusted_name proxy ->
+      if untrusted_name < 0l || untrusted_name >= Int32.of_int (Array.length registry) then
+        Fmt.failwith "Bad registry entry name %lu" untrusted_name;
+      let name = Int32.to_int untrusted_name in
       let host_name, Entry (max_version, (module M)) = registry.(name) in
       let requested_version = Proxy.version proxy in
       if requested_version > max_version then
@@ -1357,6 +1935,7 @@ let make_registry ~xwayland t reg =
       | Zxdg_decoration_manager_v1.T -> make_xdg_decoration_manager bind proxy
       | Zwp_relative_pointer_manager_v1.T -> make_relative_pointer_manager bind proxy
       | Zwp_pointer_constraints_v1.T -> make_pointer_constraints bind proxy
+      | Zwp_linux_dmabuf_v1.T -> Linux_dmabuf.make_linux_dmabuf ~virtio_gpu:t.host.virtio_gpu bind proxy
       | _ -> Fmt.failwith "Invalid service name for %a" Proxy.pp proxy
   end;
   registry |> Array.iteri (fun name (_, entry) ->
@@ -1364,7 +1943,7 @@ let make_registry ~xwayland t reg =
       C.Wl_registry.global reg ~name:(Int32.of_int name) ~interface:M.interface ~version
     )
 
-let run ?xwayland ~config host client =
+let run ?xwayland ~(error_callback:Wayland.Client.error_callback option ref) ~config host client =
   let t = { host; config } in
   let client_transport = Wayland.Unix_transport.of_socket client in
   Switch.run (fun sw ->
@@ -1383,7 +1962,14 @@ let run ?xwayland ~config host client =
             Proxy.on_delete h (fun () -> Proxy.delete cb)
         end
       in
-      ignore (s : Server.t)
+      let cb ~object_id ~code ~message =
+          Server.implementation_error s @@ Format.asprintf
+            "Host compositor posted error: object %d, code %d, message %s"
+            (Int32.to_int object_id)
+            (Int32.to_int code)
+            message in
+      error_callback := Some cb
+
     );
   Log.info (fun f -> f "Client finished; closing host connection");
   Client.stop host.display

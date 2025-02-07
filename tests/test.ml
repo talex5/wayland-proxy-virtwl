@@ -17,14 +17,14 @@ type t = {
   mutable recycled_image : ([`V1] Wl_buffer.t * image_data) option;   (* A free buffer of size [width, height] *)
 }
 
-let with_memory_fd gpu ~width ~height f =
+let with_memory_fd (gpu:Virtio_gpu.t) ~width ~height ~(dmabuf:bool) f =
   let query = {
     Virtio_gpu.Dev.
     width = Int32.of_int width;
     height = Int32.of_int height;
     drm_format = Virtio_gpu.Drm_format.xr24;
   } in
-  let image = Virtio_gpu.alloc gpu query in
+  let image = Virtio_gpu.alloc gpu ~gpu:dmabuf query in
   (* Fmt.pr "Got memory FD: %d@." (Obj.magic fd : int); *)
   Fun.protect
     (fun () -> f image)
@@ -40,7 +40,7 @@ let clear_recycle t =
 let alloc_shm t ~width ~height =
   let stride = width * 4 in
   let size = height * stride in
-  let pool, data = with_memory_fd t.gpu ~width ~height (fun { Virtio_gpu.Dev.fd; host_size; offset; _ } ->
+  let pool, data = with_memory_fd t.gpu ~width ~height ~dmabuf:false (fun { Virtio_gpu.Dev.fd; host_size; offset; _ } ->
       let pool = Wl_shm.create_pool t.shm (new Wl_shm_pool.v1) ~fd ~size:(Int32.of_int size) in
       let ba = Virtio_gpu.Utils.safe_map_file fd
           ~kind:Bigarray.Int32
@@ -57,7 +57,7 @@ let alloc_shm t ~width ~height =
       ~width:(Int32.of_int width)
       ~height:(Int32.of_int height)
       ~stride:(Int32.of_int stride)
-      ~format:Wl_shm.Format.Xrgb8888
+      ~format:(Wl_shm.Format.to_int32 Wl_shm.Format.Xrgb8888)
     @@ object
       inherit [_] Wl_buffer.v1
       method on_release buffer =
@@ -71,7 +71,7 @@ let alloc_shm t ~width ~height =
   (buffer, data)
 
 let alloc_drm t (dma, fmt) ~width ~height =
-  let make_buffer, data = with_memory_fd t.gpu ~width ~height (fun image ->
+  let make_buffer, data = with_memory_fd t.gpu ~width ~height ~dmabuf:true (fun image ->
       let buffer = Virtio_gpu.Wayland_dmabuf.create_immed dma fmt image in
       let stride = Int32.to_int image.stride / 4 in
       let ba = Virtio_gpu.Utils.safe_map_file image.fd
@@ -123,15 +123,12 @@ let or_die = function
   | Ok x -> x
   | Error (`Msg m) -> output_string stderr (m ^ "\n"); flush stderr; exit 1
 
-let get_dmabuf gpu = function
+let get_dmabuf _gpu = function
   | None -> None
   | Some dma ->
     match Virtio_gpu.Wayland_dmabuf.get_format dma Virtio_gpu.Drm_format.xr24 with
     | None -> None
-    | Some fmt ->
-      let supported = Virtio_gpu.probe_drm gpu dma in
-      if supported then Some (dma, fmt)
-      else None
+    | Some fmt -> Some (dma, fmt)
 
 let () =
   Logs.set_reporter (Logs_fmt.reporter ());

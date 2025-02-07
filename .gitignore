@@ -1,1 +1,6 @@
 _build
+*~
+/case.c
+/datum
+/datum.deps
+/doxygen_docs/

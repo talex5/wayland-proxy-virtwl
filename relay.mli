@@ -41,9 +41,16 @@ type xwayland_hooks = <
   (** The buffer scale to set and then use to transform coordinates (for HiDPI screens). *)
 >
 
-val run : ?xwayland:xwayland_hooks -> config:Config.t -> Host.t -> _ Eio_unix.Net.stream_socket -> unit
+val run : ?xwayland:xwayland_hooks
+       -> error_callback:Wayland.Client.error_callback option ref
+       -> config:Config.t
+       -> Host.t
+       -> _ Eio_unix.Net.stream_socket
+       -> unit
 (** [run ~config host client] talks the Wayland protocol to [client], relaying messages to [host].
-    Returns when the client disconnects gracefully. Raises an exception on protocol error. *)
+    Returns when the client disconnects gracefully. Raises an exception on protocol error.
+    [override_dev_t] is used to override the [dev_t] provided in the [linux-dmabuf] protocol.
+    *)
 
 val set_surface_data : _ H.Wl_surface.t -> surface_data -> unit
 (** [set_surface_data surface data] attaches [surface_data] to [surface]. *)

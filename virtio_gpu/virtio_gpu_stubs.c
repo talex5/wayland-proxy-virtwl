@@ -1,16 +1,18 @@
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/sysmacros.h>
 
 #define CAML_NAME_SPACE
 #define CAML_INTERNALS
 #include <caml/alloc.h>
 #include <caml/custom.h>
-#include <caml/memory.h>
 #include <caml/mlvalues.h>
+#include <caml/memory.h>
 #include <caml/fail.h>
 #include <caml/bigarray.h>
 #include <caml/unixsupport.h>
@@ -146,6 +148,8 @@ CAMLprim value ocaml_drm_exec_buffer(value v_fd, value v_cmd, value v_ring_idx, 
     exec.num_bo_handles = n_handles;
     for (int i = 0; i < n_handles; i++) {
       handles[i] = Int32_val(Field(v_handles, i));
+      if (handles[i] < 0)
+        caml_invalid_argument("Negative handle value");
       // printf("handle[%d] = %d\n", i, handles[i]);
     }
   }
@@ -313,14 +317,62 @@ CAMLprim value ocaml_safe_map_file(value vfd, value vkind, value vstart, value v
   return caml_unix_mapped_alloc2(flags, 1, addr, dim);
 }
 
+CAMLprim value ocaml_drm_get_dev(value v)
+{
+  CAMLparam0();
+
+  intnat fd = Long_val(v);
+  if (fd < 0 || fd > INT_MAX)
+    caml_invalid_argument("Invalid file descriptor");
+  struct stat statbuf;
+  if (fstat((int)fd, &statbuf) == -1)
+    unix_error(errno, "stat", Nothing);
+  if (!S_ISCHR(statbuf.st_mode))
+    caml_failwith("Not a character special device file");
+  dev_t dev = statbuf.st_rdev;
+  CAMLreturn(caml_alloc_initialized_string(sizeof(dev), (const char *)&dev));
+}
+
+// The non-OCaml-specific parts of this part are from ChromiumOS;
+// see NOTICE.
+CAMLprim value ocaml_fixup_strides(value prime_fd, value drm_fd_) {
+  CAMLparam2(prime_fd, drm_fd_);
+  CAMLlocal4(stride, modifier_hi, modifier_lo, out);
+  int drm_fd = Int_val(drm_fd_);
+  struct drm_prime_handle prime_handle = { .fd = Int_val(prime_fd) };
+  if (drmIoctl(drm_fd, DRM_IOCTL_PRIME_FD_TO_HANDLE, &prime_handle)) {
+    // Do not throw an exception here.
+    CAMLreturn(Val_unit);
+  }
+  struct drm_virtgpu_resource_info_cros info_arg = {
+    .bo_handle = prime_handle.handle,
+    .type = VIRTGPU_RESOURCE_INFO_TYPE_EXTENDED,
+  };
+  int ret = drmIoctl(drm_fd, DRM_IOCTL_VIRTGPU_RESOURCE_INFO_CROS, &info_arg);
+  struct drm_gem_close gem_close = { .handle = prime_handle.handle };
+  drmIoctl(drm_fd, DRM_IOCTL_GEM_CLOSE, &gem_close);
+  if (ret != 0 || info_arg.stride < 2) {
+    CAMLreturn(Val_unit);
+  }
+  stride = caml_copy_int32(info_arg.stride);
+  modifier_hi = caml_copy_int32(info_arg.format_modifier >> 32);
+  modifier_lo = caml_copy_int32(info_arg.format_modifier & 0xFFFFFFFFUL);
+  out = caml_alloc_small(3, 0);
+  Field(out, 0) = stride;
+  Field(out, 1) = modifier_hi;
+  Field(out, 2) = modifier_lo;
+  CAMLreturn(out);
+}
+
 CAMLprim value ocaml_ba_unmap(value v)
 {
-  struct caml_ba_array * b = Caml_ba_array_val(v);
+  CAMLparam1(v);
   int i;
 
   /* Free data if we're the last user, or decr ref count if not */
   caml_ba_mapped_finalize2(v);
 
+  struct caml_ba_array * b = Caml_ba_array_val(v);
   /* Prevent later GC or free from doing anything more.
      Might need a lock here with multicore?
      This is best-efforts anyway, as the compiler is allowed to assume
@@ -332,5 +384,5 @@ CAMLprim value ocaml_ba_unmap(value v)
   b->data = NULL;
   b->proxy = NULL;
 
-  return Val_unit;
+  CAMLreturn(Val_unit);
 }

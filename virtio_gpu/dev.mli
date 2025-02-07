@@ -22,7 +22,7 @@ val of_fd : sw:Switch.t -> Eio_unix.Fd.t -> t option
 (** [of_fd ~sw x] checks that [x] is a virtio-gpu device and
     initialises it. Returns [None] if it's not a virtio-device. *)
 
-val alloc : t -> query -> image
+val alloc : t -> gpu:bool -> query -> image
 (** [alloc t query] allocates a buffer matching [query] on the host and returns a handle to it.
     Use {!Utils.safe_map_file} to map it. *)
 
@@ -45,3 +45,20 @@ val close : t -> unit
 
 val is_closed : t -> bool
 (** [is_closed t] is [true] after [close t] has been called. *)
+
+val get_dev_string : t -> string
+(** [get_dev_string t] returns the string used in the Wayland protocol to refer to
+    the device used. *)
+
+type image_template = {
+  template_id : Types.Res_handle.t;
+  host_size : int64;
+  stride0 : int32;
+  offset0 : int32;
+}
+
+val get_dev : t -> Eio_unix.Fd.t
+(** [get_dev t] obtains the underlying file descriptor *)
+
+val query_image : t -> gpu:bool -> query -> image_template
+(** [query_image t ~gpu query] queries properties of the image *)

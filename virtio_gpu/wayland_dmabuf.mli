@@ -9,10 +9,6 @@ val create : Wayland.Client.t -> Wayland.Registry.t -> t option
 (** [create wayland reg] gets a Linux_dmabuf_unstable_v1 from the registry and
     collects the supported formats. Returns [None] if this interface is missing. *)
 
-val probe_drm : t -> Dev.image -> bool
-(** [probe_drm t img] tries to create a test Wl_buffer from [img].
-    Returns [true] iff this succeeds, indicating that we have access to video memory. *)
-
 val get_format : t -> Drm_format.t -> fmt option
 (** [get_format t fmt] returns the full format (with modifiers) for [fmt], if supported by [t]. *)
 

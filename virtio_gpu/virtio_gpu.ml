@@ -8,8 +8,9 @@ type transport = < Wayland.S.transport; close : unit >
 type t = {
   dev : Dev.t;
   transport : transport;
-  mutable have_dmabuf : bool option;    (* None if we haven't checked yet *)
 }
+
+let get_dev t = Dev.get_dev t.dev
 
 let wayland_transport dev conn : #Wayland.S.transport =
   object
@@ -106,37 +107,14 @@ let find_device ~sw dri_dir =
     | None -> Eio.Flow.close conn; None
     | Some dev ->
       let transport = wayland_transport dev conn in
-      Some { dev; transport; have_dmabuf = None }
+      Some { dev; transport }
   in
   find_device_gen ~dri_dir init
 
 let close t = Dev.close t.dev
 
-let alloc t = Dev.alloc t.dev
+let alloc t ~gpu query = Dev.alloc t.dev ~gpu query
 
 let wayland_transport t = t.transport
 
-let with_memory_fd gpu ~width ~height f =
-  let query = {
-    Dev.
-    width;
-    height;
-    drm_format = Drm_format.xr24;
-  } in
-  let image = alloc gpu query in
-  (* Fmt.pr "Got memory FD: %d@." (Obj.magic fd : int); *)
-  Fun.protect
-    (fun () -> f image)
-    ~finally:(fun () -> Unix.close image.fd)
-
-let probe_drm t drm =
-  match t.have_dmabuf with
-  | Some x -> x
-  | None ->
-    let x =
-      with_memory_fd t ~width:1l ~height:1l (fun image ->
-          Wayland_dmabuf.probe_drm drm image
-        )
-    in
-    t.have_dmabuf <- Some x;
-    x
+let device_string t = Dev.get_dev_string t.dev
