@@ -1213,6 +1213,30 @@ let make_pointer_constraints bind proxy =
       make_confined_pointer ~host_pointer locked_pointer
   end
 
+let make_viewport ~host_viewport c =
+  let h = host_viewport @@ new H.Wp_viewport.v1 in
+  Proxy.Handler.attach c @@ object
+    inherit [_] C.Wp_viewport.v1
+
+    method on_destroy = delete_with H.Wp_viewport.destroy h
+    method on_set_source _ = H.Wp_viewport.set_source h
+    method on_set_destination _ = H.Wp_viewport.set_destination h
+  end
+
+let make_viewporter bind proxy =
+  let proxy = Proxy.cast_version proxy in
+  let h = bind @@ new H.Wp_viewporter.v1 in
+  Proxy.Handler.attach proxy @@ object
+    inherit [_] C.Wp_viewporter.v1
+
+    method on_destroy = delete_with H.Wp_viewporter.destroy h
+
+    method on_get_viewport _ viewport ~surface =
+      let surface = to_host surface in
+      let host_viewport = H.Wp_viewporter.get_viewport h ~surface in
+      make_viewport ~host_viewport viewport
+  end
+
 (* This is basically the same as [Gtk_primary], but with things renamed a bit. *)
 module Zwp_primary = struct
   let make_data_offer ~client_offer h =
@@ -1301,6 +1325,7 @@ let registry =
     (module Zxdg_decoration_manager_v1);
     (module Zwp_relative_pointer_manager_v1);
     (module Zwp_pointer_constraints_v1);
+    (module Wp_viewporter);
   ]
 
 let make_registry ~xwayland t reg =
@@ -1357,6 +1382,7 @@ let make_registry ~xwayland t reg =
       | Zxdg_decoration_manager_v1.T -> make_xdg_decoration_manager bind proxy
       | Zwp_relative_pointer_manager_v1.T -> make_relative_pointer_manager bind proxy
       | Zwp_pointer_constraints_v1.T -> make_pointer_constraints bind proxy
+      | Wp_viewporter.T -> make_viewporter bind proxy
       | _ -> Fmt.failwith "Invalid service name for %a" Proxy.pp proxy
   end;
   registry |> Array.iteri (fun name (_, entry) ->
