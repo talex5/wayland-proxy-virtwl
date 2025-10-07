@@ -1,11 +1,14 @@
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
-    flake-utils.url = "github:numtide/flake-utils";
+    systems.url = "github:nix-systems/default-linux";
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs = { self, nixpkgs, systems }:
+    let
+      forEachSystem = nixpkgs.lib.genAttrs (import systems);
+    in
+    forEachSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
         inherit (pkgs) ocamlPackages;
@@ -14,7 +17,7 @@
         packages = {
           proxy =
             # Based on build rule in nixpkgs, by qyliss and sternenseemann
-            ocamlPackages.buildDunePackage rec {
+            ocamlPackages.buildDunePackage {
               pname = "wayland-proxy-virtwl";
               version = "dev";
 
