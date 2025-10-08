@@ -1,12 +1,11 @@
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
-    systems.url = "github:nix-systems/default-linux";
   };
 
-  outputs = { self, nixpkgs, systems }:
+  outputs = { self, nixpkgs }:
     let
-      forEachSystem = nixpkgs.lib.genAttrs (import systems);
+      forEachSystem = nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" ];
     in
     forEachSystem (system:
       let
