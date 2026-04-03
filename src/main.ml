@@ -151,6 +151,9 @@ let args =
     ~doc:"Sub-command to execute"
     []
 
+let ( $ ) = Term.( $ )
+let ( $$ ) f x = Term.const f $ x
+
 let () =
   Printexc.record_backtrace true;
   Eio_main.run @@ fun env ->
@@ -158,6 +161,6 @@ let () =
   Switch.run @@ fun sw ->
   let virtwl_proxy =
     let info = Cmd.info "wayland-proxy-virtwl" in
-    Cmd.v info Term.(const (main ~env) $ Trace.cmdliner ~sw ~fs $ virtio_gpu $ wayland_display $ x_display $ Config.cmdliner $ args)
+    Cmd.v info (main ~env $$ Trace.cmdliner ~sw ~fs $ virtio_gpu $ wayland_display $ x_display $ Config.cmdliner $ args)
   in
   exit @@ Cmd.eval_result virtwl_proxy
