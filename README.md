@@ -149,7 +149,7 @@ The classes are:
 - `drawing` -- attaching buffers, marking damage
 - `hints` -- window manager hints
 
-See [trace.ml](./trace.ml) for details.
+See [trace.ml](./src/trace.ml) for details.
 
 You can configure the proxy to log to an in-memory ring-buffer, and then dump that whenever an error occurs.
 Use e.g. `-v --log-ring-path ~/wayland.log` to enable this feature.
@@ -168,10 +168,10 @@ This is useful if an application is misbehaving and you want to check its recent
 
 ## Hacking
 
-Execution starts in `main.ml`,
+Execution starts in `src/main.ml`,
 which parses the command-line arguments and then starts listening for Wayland and/or X connections.
 
-Wayland connections are handled by `relay.ml`.
+Wayland connections are handled by `src/relay.ml`.
 `Relay.create` connects to the host compositor and `Relay.accept` accepts the connection from the client
 (each connection gets its own relay anyway, but this split simplifies the code a bit).
 `make_registry` generates the `Wl_registry` object offered to clients.
