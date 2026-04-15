@@ -41,6 +41,7 @@ type paired = {
   window : X11.Window.t;
   unmap : unit -> unit;
   xdg_surface : [`V1] Xdg_surface.t;
+  viewport : [`V1] H.Wp_viewport.t;
   mutable xdg_role : [
     | `Toplevel of toplevel
     | `Popup of [`V1] Xdg_popup.t
@@ -57,7 +58,7 @@ let paired_of_surface s =
   | X11 x -> Some x
   | _ -> None
 
-let pp_paired f { window; unmap = _; xdg_surface; xdg_role; geometry; override_redirect } =
+let pp_paired f { window; unmap = _; viewport = _; xdg_surface; xdg_role; geometry; override_redirect } =
   Fmt.pf f "%a@%a/%t=%a%s"
     Proxy.pp xdg_surface
     X11.Geometry.pp geometry
@@ -75,6 +76,7 @@ type t = {
   config : Config.t;
   wm_base : [`V1] Xdg_wm_base.t;
   decor_mgr : [`V1] Xdg_decor_mgr.t option;
+  viewporter : [`V1] H.Wp_viewporter.t;
   unpaired : (int32, unpaired) Hashtbl.t;         (* Client-side Wayland ID -> details *)
   unpaired_added : Eio.Condition.t;               (* Fires when [unpaired] gets a new entry. *)
   paired : (X11.Window.t, paired) Hashtbl.t;      (* X11 ID -> details *)
@@ -685,6 +687,7 @@ let pair t ~set_configured ~host_surface window =
               | _ -> `Show
             )
         end in
+      let viewport = H.Wp_viewporter.get_viewport t.viewporter ~surface:host_surface @@ new H.Wp_viewport.v1 in
       let unmap () =
         if Wayland.Proxy.can_send host_surface then (
           Wl_surface.attach host_surface ~buffer:None ~x:0l ~y:0l;
@@ -695,6 +698,7 @@ let pair t ~set_configured ~host_surface window =
         window;
         unmap;
         xdg_surface;
+        viewport;
         geometry = info.geometry;
         xdg_role = `None;
         override_redirect = info.win_attrs.override_redirect;
@@ -749,6 +753,7 @@ let unpair t paired =
     | `None -> ()
   end;
   Xdg_surface.destroy paired.xdg_surface;
+  H.Wp_viewport.destroy paired.viewport;
   Hashtbl.remove t.paired paired.window;
   begin match t.pointer_surface with
     | Some p when p == paired ->
@@ -1020,6 +1025,7 @@ let handle_xwayland ~config ~local_wayland ~local_wm_socket ~connect_host =
       method on_capabilities _ ~capabilities:_ = ()
     end
   in
+  let viewporter = Wayland.Registry.bind host.registry @@ new H.Wp_viewporter.v1 in
   let decor_mgr =
     try Some (Wayland.Registry.bind host.registry @@ new Xdg_decor_mgr.v1)
     with ex ->
@@ -1033,6 +1039,7 @@ let handle_xwayland ~config ~local_wayland ~local_wm_socket ~connect_host =
     config;
     wm_base;
     decor_mgr;
+    viewporter;
     unpaired = Hashtbl.create 5;
     unpaired_added = Eio.Condition.create ();
     paired = Hashtbl.create 5;
@@ -1073,6 +1080,16 @@ let handle_xwayland ~config ~local_wayland ~local_wm_socket ~connect_host =
       | Some paired ->
         Input.surface_destroyed input paired;
         unpair t paired
+
+    method on_attach ~surface =
+      match paired_of_surface surface with
+      | None -> ()
+      | Some paired ->
+        let { X11.Geometry.width; height; _ } = paired.geometry in
+        let (width, height) = scale_to_host t (width, height) in
+        H.Wp_viewport.set_destination paired.viewport
+          ~width:(Int32.of_int width)
+          ~height:(Int32.of_int height)
 
     method set_ping fn =
       t.wayland_ping <- fn
