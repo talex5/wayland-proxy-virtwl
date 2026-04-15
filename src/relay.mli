@@ -33,6 +33,10 @@ type xwayland_hooks = <
     unit;
   (** Called when the keyboard leaves a surface. *)
 
+  on_attach : 'v.
+    surface:([< `V1 | `V2 | `V3 | `V4 | `V5 | `V6] as 'v) H.Wl_surface.t ->
+    unit;
+
   set_ping : (unit -> unit) -> unit;
   (** When/if Xwayland creates an xdg_wm_base object, this is called to provide a ping function.
       This does a round-trip to the client, ensuring that all previously sent events have been delivered. *)

@@ -43,6 +43,10 @@ type xwayland_hooks = <
     surface:([< `V1 | `V2 | `V3 | `V4 | `V5 | `V6] as 'v) H.Wl_surface.t ->
     unit;
 
+  on_attach : 'v.
+    surface:([< `V1 | `V2 | `V3 | `V4 | `V5 | `V6] as 'v) H.Wl_surface.t ->
+    unit;
+
   set_ping : (unit -> unit) -> unit;
 
   scale : int32;
@@ -436,7 +440,8 @@ let make_surface ~xwayland ~host_surface c =
             data.client_memory <- buffer.client_memory;
             buffer.host_buffer
         in
-        H.Wl_surface.attach h ~buffer:(Some host_buffer) ~x ~y
+        H.Wl_surface.attach h ~buffer:(Some host_buffer) ~x ~y;
+        xwayland |> Option.iter (fun (x:xwayland_hooks) -> x#on_attach ~surface:h)
       | _ ->
         data.host_memory <- Cstruct.empty;
         data.client_memory <- Cstruct.empty;
@@ -493,16 +498,7 @@ let make_surface ~xwayland ~host_surface c =
       H.Wl_surface.offset h ~x ~y
   end;
   xwayland |> Option.iter (fun (x:xwayland_hooks) ->
-      if x#scale <> 1l then
-        H.Wl_surface.set_buffer_scale h ~scale:x#scale;       (* Xwayland will be a new enough version *)
       let set_configured s =
-        if s = `Unmanaged && x#scale <> 1l then (
-          (* For pointer cursors we want them at the normal size, even if low-res.
-             Also, Vim tries to hide the pointer by setting a 1x1 cursor, which confuses things
-             when unscaled. Ideally we would stop doing transforms in this case, but it doesn't
-             seem to matter. *)
-          H.Wl_surface.set_buffer_scale h ~scale:1l;
-        );
         state := s;
         match data.state with
         | Ready | Destroyed -> ()
