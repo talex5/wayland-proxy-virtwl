@@ -703,7 +703,9 @@ let pair t ~set_configured ~host_surface window =
         xdg_role = `None;
         override_redirect = info.win_attrs.override_redirect;
       } in
-      Hashtbl.add t.paired window paired;
+      (* Replace because this might be a new window with the same XID and we haven't yet
+         received the Wayland surface destroy message. *)
+      Hashtbl.replace t.paired window paired;
       Relay.set_surface_data host_surface (X11 paired);
       let fallback_parent = if parent = None then last_event_surface t else parent in
       match info.window_type, fallback_parent with
@@ -754,7 +756,8 @@ let unpair t paired =
   end;
   Xdg_surface.destroy paired.xdg_surface;
   H.Wp_viewport.destroy paired.viewport;
-  Hashtbl.remove t.paired paired.window;
+  (* Note: it might have been replaced by a newer window with the same XID first, so check: *)
+  if Hashtbl.find t.paired paired.window == paired then Hashtbl.remove t.paired paired.window;
   begin match t.pointer_surface with
     | Some p when p == paired ->
       t.pointer_surface <- None;
