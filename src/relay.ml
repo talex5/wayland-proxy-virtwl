@@ -19,32 +19,34 @@ type surface_data = ..
 
 type surface_data += No_surface_data
 
+type surface_versions = [`V1 | `V2 | `V3 | `V4 | `V5 | `V6 | `V7]
+
 type xwayland_hooks = <
   on_create_surface :
-    'v. ([< `V1 | `V2 | `V3 | `V4 | `V5 | `V6] as 'v) H.Wl_surface.t -> 'v C.Wl_surface.t ->
+    'v. ([< surface_versions] as 'v) H.Wl_surface.t -> 'v C.Wl_surface.t ->
     set_configured:([`Show | `Hide | `Unmanaged] -> unit) ->
     unit;
 
   on_destroy_surface :
-    'v. ([< `V1 | `V2 | `V3 | `V4 | `V5 | `V6] as 'v) H.Wl_surface.t ->
+    'v. ([< surface_versions] as 'v) H.Wl_surface.t ->
     unit;
 
   on_pointer_entry : 'v.
-    surface:([< `V1 | `V2 | `V3 | `V4 | `V5 | `V6] as 'v) H.Wl_surface.t ->
+    surface:([< surface_versions] as 'v) H.Wl_surface.t ->
     forward_event:(unit -> unit) ->
     unit;
 
   on_keyboard_entry : 'v.
-    surface:([< `V1 | `V2 | `V3 | `V4 | `V5 | `V6] as 'v) H.Wl_surface.t ->
+    surface:([< surface_versions] as 'v) H.Wl_surface.t ->
     forward_event:(unit -> unit) ->
     unit;
 
   on_keyboard_leave : 'v.
-    surface:([< `V1 | `V2 | `V3 | `V4 | `V5 | `V6] as 'v) H.Wl_surface.t ->
+    surface:([< surface_versions] as 'v) H.Wl_surface.t ->
     unit;
 
   on_attach : 'v.
-    surface:([< `V1 | `V2 | `V3 | `V4 | `V5 | `V6] as 'v) H.Wl_surface.t ->
+    surface:([< surface_versions] as 'v) H.Wl_surface.t ->
     unit;
 
   set_ping : (unit -> unit) -> unit;
@@ -496,6 +498,13 @@ let make_surface ~xwayland ~host_surface c =
       when_configured @@ fun () ->
       let (x, y) = scale_to_host ~xwayland (x, y) in
       H.Wl_surface.offset h ~x ~y
+
+    method on_get_release _ callback =
+      let _ : _ Proxy.t = H.Wl_surface.get_release h @@ Wayland.callback @@ fun callback_data ->
+        C.Wl_callback.done_ callback ~callback_data;
+        Proxy.delete callback
+      in
+      Proxy.Handler.attach callback @@ new C.Wl_callback.v1
   end;
   xwayland |> Option.iter (fun (x:xwayland_hooks) ->
       let set_configured s =
@@ -523,6 +532,7 @@ let make_compositor ~xwayland bind proxy =
     inherit [_] C.Wl_compositor.v1
     method on_create_region _ = make_region ~host_region:(H.Wl_compositor.create_region h)
     method on_create_surface _ = make_surface ~xwayland ~host_surface:(H.Wl_compositor.create_surface h)
+    method on_release = delete_with H.Wl_compositor.release h
   end
 
 let make_subsurface ~xwayland ~host_subsurface c =
@@ -664,6 +674,8 @@ let make_pointer t ~xwayland ~host_seat c =
       method on_frame _ = C.Wl_pointer.frame c
 
       method on_axis_relative_direction _ = C.Wl_pointer.axis_relative_direction c
+
+      method on_warp _ = C.Wl_pointer.warp c
     end
   in
   let user_data = client_data (CD.Pointer h) in
@@ -1076,9 +1088,12 @@ let make_data_device_manager ~xwayland bind proxy =
     inherit [_] C.Wl_data_device_manager.v1
     method on_create_data_source _ c =
       make_data_source c ~host_source:(H.Wl_data_device_manager.create_data_source h)
+
     method on_get_data_device _ c ~seat =
       let seat = to_host seat in
       make_data_device ~xwayland c ~host_device:(H.Wl_data_device_manager.get_data_device h ~seat)
+
+    method on_release = delete_with H.Wl_data_device_manager.release h
   end
 
 module Gtk_primary = struct
