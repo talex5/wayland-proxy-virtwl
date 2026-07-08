@@ -15,8 +15,8 @@ module Xdg_positioner = Wayland_protocols.Xdg_shell_client.Xdg_positioner
 module Xdg_decor_mgr = Wayland_protocols.Xdg_decoration_unstable_v1_client.Zxdg_decoration_manager_v1
 module Xdg_decoration = Wayland_protocols.Xdg_decoration_unstable_v1_client.Zxdg_toplevel_decoration_v1
 
-type host_surface = [`V1 | `V2 | `V3 | `V4 | `V5 | `V6] Wayland.Wayland_client.Wl_surface.t
-type client_surface = [`V1 | `V2 | `V3 | `V4 | `V5 | `V6] Wayland.Wayland_server.Wl_surface.t
+type host_surface = Relay.surface_versions Wayland.Wayland_client.Wl_surface.t
+type client_surface = Relay.surface_versions Wayland.Wayland_server.Wl_surface.t
 
 (* When Xwayland notifies us of a new surface over the Wayland connection, we record the details.
    We don't yet know the X11 window ID, however.
@@ -143,7 +143,7 @@ module Selection = struct
     sw : Eio.Switch.t;
     x11 : X11.Display.t Promise.or_exn;
     wayland_primary_offer : [`V1] Primary_offer.t option ref;
-    wayland_clipboard_offer : [`V1|`V2|`V3] Clipboard_offer.t option ref;
+    wayland_clipboard_offer : [`V1|`V2|`V3|`V4] Clipboard_offer.t option ref;
     primary_selection : ([`V1] Primary_mgr.t * [`V1] Primary_device.t) option;
     clipboard_mgr : [`V1] Clipboard_mgr.t;
     clipboard_device : [`V1] Clipboard_device.t;

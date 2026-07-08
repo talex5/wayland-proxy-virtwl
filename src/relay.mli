@@ -1,9 +1,11 @@
 type surface_data = ..
 (** Extra data that the Xwayland support may add to a surface. *)
 
+type surface_versions = [`V1 | `V2 | `V3 | `V4 | `V5 | `V6 | `V7]
+
 type xwayland_hooks = <
   on_create_surface :
-    'v. ([< `V1 | `V2 | `V3 | `V4 | `V5 | `V6] as 'v) H.Wl_surface.t -> 'v C.Wl_surface.t ->
+    'v. ([< surface_versions] as 'v) H.Wl_surface.t -> 'v C.Wl_surface.t ->
     set_configured:([`Show | `Hide | `Unmanaged] -> unit) ->
     unit;
   (** Called when a new client wl_surface is created, along with the new host surface.
@@ -11,30 +13,30 @@ type xwayland_hooks = <
       Pass [`Hide] to suppress attaching any buffers; this will keep the window invisible (hack for GTK DnD windows). *)
 
   on_destroy_surface :
-    'v. ([< `V1 | `V2 | `V3 | `V4 | `V5 | `V6] as 'v) H.Wl_surface.t ->
+    'v. ([< surface_versions] as 'v) H.Wl_surface.t ->
     unit;
   (** Called when the client destroys the surface, just before forwarding the destroy to the host surface.
       Use this opportunity to destroy any role attached to the host surface. *)
 
   on_pointer_entry : 'v.
-    surface:([< `V1 | `V2 | `V3 | `V4 | `V5 | `V6] as 'v) H.Wl_surface.t ->
+    surface:([< surface_versions] as 'v) H.Wl_surface.t ->
     forward_event:(unit -> unit) ->
     unit;
   (** Called when the pointer enters a surface. Call [forward_event] to forward the enter event to the client. *)
 
   on_keyboard_entry : 'v.
-    surface:([< `V1 | `V2 | `V3 | `V4 | `V5 | `V6] as 'v) H.Wl_surface.t ->
+    surface:([< surface_versions] as 'v) H.Wl_surface.t ->
     forward_event:(unit -> unit) ->
     unit;
   (** Called when the keyboard enters a surface. Call [forward_event] to forward the enter event to the client. *)
 
   on_keyboard_leave : 'v.
-    surface:([< `V1 | `V2 | `V3 | `V4 | `V5 | `V6] as 'v) H.Wl_surface.t ->
+    surface:([< surface_versions] as 'v) H.Wl_surface.t ->
     unit;
   (** Called when the keyboard leaves a surface. *)
 
   on_attach : 'v.
-    surface:([< `V1 | `V2 | `V3 | `V4 | `V5 | `V6] as 'v) H.Wl_surface.t ->
+    surface:([< surface_versions] as 'v) H.Wl_surface.t ->
     unit;
 
   set_ping : (unit -> unit) -> unit;
