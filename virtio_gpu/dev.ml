@@ -53,6 +53,7 @@ type version
 
 external drm_get_version : Unix.file_descr -> version = "ocaml_drm_get_version"
 external drm_get_caps : Unix.file_descr -> Cstruct.buffer -> unit = "ocaml_drm_get_caps"
+external drm_get_alignment : Unix.file_descr -> int = "ocaml_drm_get_alignment"
 external drm_version_name : version -> string = "ocaml_drm_version_name"
 external drm_context_init : Unix.file_descr -> int -> Cstruct.buffer -> unit = "ocaml_drm_context_init"
 external drm_create_blob : Unix.file_descr -> Create_blob.t -> unit = "ocaml_drm_create_blob"
@@ -64,6 +65,11 @@ external drm_prime_fd_to_handle : Unix.file_descr -> Unix.file_descr -> gem_hand
 external drm_resource_info : Unix.file_descr -> gem_handle -> Res_handle.t = "ocaml_drm_resource_info"
 external drm_wait : Unix.file_descr -> gem_handle -> unit = "ocaml_drm_wait"
 external close_gem_handle : Unix.file_descr -> gem_handle -> unit = "ocaml_close_gem_handle"
+
+let drm_get_alignment fd =
+  Eio_unix.Fd.use_exn "drm_get_alignment" fd @@ fun fd ->
+  try Some (drm_get_alignment fd)
+  with Unix.Unix_error(Unix.EINVAL, _, _) -> None
 
 let drm_exec_buffer ?ring ?(handles=[| |]) fd data =
   let ring = ring |> Option.map (function
@@ -120,6 +126,10 @@ let of_fd ~sw fd =
   else (
     check_caps unix_fd;
     (* todo: Get parameters, check it supports Wayland *)
+    let alignment = drm_get_alignment fd in
+    Log.info (fun f -> f "Blob alignment requirement: %a" Fmt.(Dump.option int) alignment);
+    if alignment = Some 0 then Log.err (fun f -> f "Linux requires a blob alignment of 0, which can't work!");
+    (* todo: use the alignment, if we ever get a sensible one *)
     init_context unix_fd [
       `Capset_id `Cross_domain;
       `Num_rings 2;
