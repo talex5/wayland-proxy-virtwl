@@ -51,10 +51,12 @@ extern "C" {
 
 #define VIRTGPU_EXECBUF_FENCE_FD_IN	0x01
 #define VIRTGPU_EXECBUF_FENCE_FD_OUT	0x02
-#define VIRTGPU_EXECBUF_RING_IDX 0x04
-#define VIRTGPU_EXECBUF_FLAGS                                   \
-  (VIRTGPU_EXECBUF_FENCE_FD_IN | VIRTGPU_EXECBUF_FENCE_FD_OUT | \
-   VIRTGPU_EXECBUF_RING_IDX | 0)
+#define VIRTGPU_EXECBUF_RING_IDX	0x04
+#define VIRTGPU_EXECBUF_FLAGS  (\
+		VIRTGPU_EXECBUF_FENCE_FD_IN |\
+		VIRTGPU_EXECBUF_FENCE_FD_OUT |\
+		VIRTGPU_EXECBUF_RING_IDX |\
+		0)
 
 struct drm_virtgpu_map {
 	__u64 offset; /* use for mmap system call */
@@ -62,6 +64,17 @@ struct drm_virtgpu_map {
 	__u32 pad;
 };
 
+#define VIRTGPU_EXECBUF_SYNCOBJ_RESET		0x01
+#define VIRTGPU_EXECBUF_SYNCOBJ_FLAGS ( \
+		VIRTGPU_EXECBUF_SYNCOBJ_RESET | \
+		0)
+struct drm_virtgpu_execbuffer_syncobj {
+	__u32 handle;
+	__u32 flags;
+	__u64 point;
+};
+
+/* fence_fd is modified on success if VIRTGPU_EXECBUF_FENCE_FD_OUT flag is set. */
 struct drm_virtgpu_execbuffer {
 	__u32 flags;
 	__u32 size;
@@ -69,8 +82,12 @@ struct drm_virtgpu_execbuffer {
 	__u64 bo_handles;
 	__u32 num_bo_handles;
 	__s32 fence_fd; /* in/out fence fd (see VIRTGPU_EXECBUF_FENCE_FD_IN/OUT) */
-        __u32 ring_idx; /* which command ring to use for fence creation */
-        __u32 pad;
+	__u32 ring_idx; /* command ring index (see VIRTGPU_EXECBUF_RING_IDX) */
+	__u32 syncobj_stride; /* size of @drm_virtgpu_execbuffer_syncobj */
+	__u32 num_in_syncobjs;
+	__u32 num_out_syncobjs;
+	__u64 in_syncobjs;
+	__u64 out_syncobjs;
 };
 
 #define VIRTGPU_PARAM_3D_FEATURES 1 /* do we have 3D features in the hw */
@@ -80,6 +97,8 @@ struct drm_virtgpu_execbuffer {
 #define VIRTGPU_PARAM_CROSS_DEVICE 5 /* Cross virtio-device resource sharing  */
 #define VIRTGPU_PARAM_CONTEXT_INIT 6 /* DRM_VIRTGPU_CONTEXT_INIT */
 #define VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs 7 /* Bitmask of supported capability set ids */
+#define VIRTGPU_PARAM_EXPLICIT_DEBUG_NAME 8 /* Ability to set debug name from userspace */
+#define VIRTGPU_PARAM_BLOB_ALIGNMENT 9 /* Device alignment requirements for blobs */
 
 struct drm_virtgpu_getparam {
 	__u64 param;
@@ -110,29 +129,6 @@ struct drm_virtgpu_resource_info {
 	__u32 res_handle;
 	__u32 size;
 	__u32 blob_mem;
-};
-
-/* CHROMIUM */
-struct drm_virtgpu_resource_info_cros {
-	__u32 bo_handle;
-	__u32 res_handle;
-	__u32 size;
-
-/* Return res_handle and size.  Return extended info (strides, num_planes,
- * etc.) until chromeos-5.4 and return blob_mem since chromeos-5.10.
- */
-#define VIRTGPU_RESOURCE_INFO_TYPE_DEFAULT 0
-/* Return res_handle, size, and extended info */
-#define VIRTGPU_RESOURCE_INFO_TYPE_EXTENDED 1
-	union {
-		__u32 type; /* in, VIRTGPU_RESOURCE_INFO_TYPE_* */
-		__u32 blob_mem;
-		__u32 stride;
-		__u32 strides[4]; /* strides[0] is accessible with stride. */
-	};
-	__u32 num_planes;
-	__u32 offsets[4];
-	__u64 format_modifier;
 };
 
 struct drm_virtgpu_3d_box {
@@ -168,6 +164,12 @@ struct drm_virtgpu_3d_wait {
 	__u32 flags;
 };
 
+#define VIRTGPU_DRM_CAPSET_VIRGL 1
+#define VIRTGPU_DRM_CAPSET_VIRGL2 2
+#define VIRTGPU_DRM_CAPSET_GFXSTREAM_VULKAN 3
+#define VIRTGPU_DRM_CAPSET_VENUS 4
+#define VIRTGPU_DRM_CAPSET_CROSS_DOMAIN 5
+#define VIRTGPU_DRM_CAPSET_DRM 6
 struct drm_virtgpu_get_caps {
 	__u32 cap_set_id;
 	__u32 cap_set_ver;
@@ -199,11 +201,16 @@ struct drm_virtgpu_resource_create_blob {
 	__u32 cmd_size;
 	__u64 cmd;
 	__u64 blob_id;
+
+#define DRM_VIRTGPU_BLOB_FLAG_HINT_DEFER_MAPPING        0x0001
+	__u32 blob_hints;
+	__u32 pad2;
 };
 
-#define VIRTGPU_CONTEXT_PARAM_CAPSET_ID 0x0001
-#define VIRTGPU_CONTEXT_PARAM_NUM_RINGS 0x0002
+#define VIRTGPU_CONTEXT_PARAM_CAPSET_ID       0x0001
+#define VIRTGPU_CONTEXT_PARAM_NUM_RINGS       0x0002
 #define VIRTGPU_CONTEXT_PARAM_POLL_RINGS_MASK 0x0003
+#define VIRTGPU_CONTEXT_PARAM_DEBUG_NAME      0x0004
 struct drm_virtgpu_context_set_param {
 	__u64 param;
 	__u64 value;
@@ -242,11 +249,6 @@ struct drm_virtgpu_context_init {
 #define DRM_IOCTL_VIRTGPU_RESOURCE_INFO \
 	DRM_IOWR(DRM_COMMAND_BASE + DRM_VIRTGPU_RESOURCE_INFO, \
 		 struct drm_virtgpu_resource_info)
-
-/* same ioctl number as DRM_IOCTL_VIRTGPU_RESOURCE_INFO */
-#define DRM_IOCTL_VIRTGPU_RESOURCE_INFO_CROS \
-	DRM_IOWR(DRM_COMMAND_BASE + DRM_VIRTGPU_RESOURCE_INFO, \
-		 struct drm_virtgpu_resource_info_cros)
 
 #define DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST \
 	DRM_IOWR(DRM_COMMAND_BASE + DRM_VIRTGPU_TRANSFER_FROM_HOST,	\

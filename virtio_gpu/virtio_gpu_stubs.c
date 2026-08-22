@@ -68,6 +68,19 @@ CAMLprim value ocaml_drm_get_caps(value fd, value v_caps) {
   CAMLreturn(Val_unit);
 }
 
+CAMLprim value ocaml_drm_get_alignment(value fd) {
+  int alignment;
+  struct drm_virtgpu_getparam get_param = {
+    .param = VIRTGPU_PARAM_BLOB_ALIGNMENT,
+    .value = (uint64_t)(uintptr_t) &alignment,
+  };
+  int ret = drmIoctl(Int_val(fd), DRM_IOCTL_VIRTGPU_GETPARAM, &get_param);
+  if (ret < 0) {
+    unix_error(errno, "DRM_IOCTL_VIRTGPU_GETPARAM", Nothing);
+  }
+  return Val_int(alignment);
+}
+
 CAMLprim value ocaml_drm_version_name(value v_version) {
   CAMLparam1(v_version);
   drmVersion *v = Version_val(v_version);
