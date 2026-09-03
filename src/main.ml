@@ -112,10 +112,9 @@ let main ~env setup_tracing use_virtio_gpu wayland_display x_display config args
   | [] -> Fiber.await_cancel ()
   | args ->
     let env =
-      Unix.environment ()
-      |> Array.to_list
-      |> Unix_env.replace "WAYLAND_DISPLAY" wayland_display
-      |> Array.of_list
+      Eio.Process.environment proc_mgr |> Eio.Process.Env.override [
+        "WAYLAND_DISPLAY", Some wayland_display;
+      ]
     in
     let status = Eio.Process.spawn ~sw proc_mgr args ~env |> Eio.Process.await in
     Log.info (fun f -> f "Application process ended (%a)" Eio.Process.pp_status status);

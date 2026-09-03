@@ -1125,9 +1125,9 @@ let spawn_and_run_xwayland ~proc_mgr ~config ~connect_host ~display listen_socke
   ] in
   let inherit_fd r = (int_fd_of_resource r, Eio_unix.Net.fd r, `Blocking) in
   let env =
-    Unix.environment ()
-    |> Array.to_list
-    |> Unix_env.replace "WAYLAND_SOCKET" (string_of_fd remote_wayland)
+    Eio.Process.environment proc_mgr |> Eio.Process.Env.override [
+      "WAYLAND_SOCKET", Some (string_of_fd remote_wayland);
+    ]
   in
   let child =
     let fds = [
@@ -1145,10 +1145,7 @@ let spawn_and_run_xwayland ~proc_mgr ~config ~connect_host ~display listen_socke
         (2, null, `Blocking) :: fds
       ) else fds
     in
-    Eio_unix.Process.spawn_unix ~sw proc_mgr cmd
-      ~env:(Array.of_list env)
-      ~fds
-  in
+    Eio_unix.Process.spawn_unix ~sw proc_mgr cmd ~env ~fds in
   Eio.Flow.close remote_wm_socket;
   Eio.Flow.close remote_wayland;
   try
