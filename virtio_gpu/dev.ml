@@ -69,7 +69,7 @@ external close_gem_handle : Unix.file_descr -> gem_handle -> unit = "ocaml_close
 let drm_get_alignment fd =
   Eio_unix.Fd.use_exn "drm_get_alignment" fd @@ fun fd ->
   try Some (drm_get_alignment fd)
-  with Unix.Unix_error(Unix.EINVAL, _, _) -> None
+  with Unix.Unix_error((EINVAL|ENOENT), _, _) -> None
 
 let drm_exec_buffer ?ring ?(handles=[| |]) fd data =
   let ring = ring |> Option.map (function
