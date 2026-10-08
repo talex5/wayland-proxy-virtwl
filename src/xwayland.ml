@@ -335,7 +335,7 @@ module Selection = struct
   (* Fetch an X selection from an X client and write it to [dst].
      [dst] will be closed afterwards. *)
   let send_x_selection t selection ~via:requestor ~mime_type ~dst =
-    let w = Eio_unix.Net.import_socket_stream ~sw:t.sw ~close_unix:true dst in        (* Will close dst *)
+    let w = Eio_unix.File.import_rw ~sw:t.sw ~close_unix:true dst in        (* Will close dst *)
     Fiber.fork ~sw:t.sw (fun () ->
         Fun.protect
           (fun () ->
