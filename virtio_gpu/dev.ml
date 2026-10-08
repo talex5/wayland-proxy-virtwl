@@ -207,7 +207,7 @@ let create_send t data fds =
     | Unix.{ st_kind = S_FIFO; _ } ->
       (* Send a pipe *)
       let fd = Unix.dup ~cloexec:true fd in
-      let pipe = (Eio_unix.Net.import_socket_stream ~sw:t.sw ~close_unix:true fd :> Eio_unix.sink_ty r) in
+      let pipe = (Eio_unix.File.import_rw ~sw:t.sw ~close_unix:true fd :> Eio_unix.sink_ty r) in
       let id = Res_handle.next_pipe_id t.last_pipe_id in
       t.pipe_of_id <- Res_handle.Map.add id pipe t.pipe_of_id;
       t.last_pipe_id <- id;

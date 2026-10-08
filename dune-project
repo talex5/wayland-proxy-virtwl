@@ -12,8 +12,8 @@
    (logs (>= 0.7.0))
    (cmdliner (>= 1.1.0))
    (cstruct (>= 6.2.0))
-   (eio (>= 0.12))
-   (eio_main (>= 1.1))
+   (eio (>= 1.6))
+   eio_main
    (ppx_cstruct (>= 6.2.0))
    (ocaml (>= 5.1.0))
    (fmt (>= 0.8.9))
